@@ -1,0 +1,46 @@
+# Binaries
+gasp
+gasp_linux_amd64
+gasp_linux_arm64
+
+# Go build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Dependency directories
+vendor/
+
+# Go workspace file
+go.work
+
+# IDE specific
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# Config files with secrets
+*.local.yaml
+*.secret.yaml
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Claude Code settings
+.claude/
