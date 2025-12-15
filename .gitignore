@@ -1,7 +1,7 @@
-# Binaries
-gasp
-gasp_linux_amd64
-gasp_linux_arm64
+# Binaries (in root directory only)
+/gasp
+/gasp_linux_amd64
+/gasp_linux_arm64
 
 # Go build artifacts
 *.exe
