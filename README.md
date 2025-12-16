@@ -6,6 +6,8 @@
 
 **Current Version:** 0.1.0-dev (MVP in progress)
 
+> ⚠️ **SECURITY WARNING**: This version of GASP has **NO AUTHENTICATION**. It must run on trusted networks behind a firewall. **DO NOT EXPOSE THIS VERSION TO THE INTERNET.** Authentication will be added in an upcoming release.
+
 **Implemented Features:**
 - ✅ HTTP server with `/health`, `/metrics`, and `/version` endpoints
 - ✅ CPU metrics collection (load averages, utilization, trend analysis)
@@ -13,8 +15,10 @@
 - ✅ Rich contextual interpretations for all metrics
 - ✅ Concurrent collector architecture
 - ✅ Health scoring and concern detection
+- ✅ **Claude Code skill bundled** - instant AI diagnostics for your infrastructure
 
 **Planned Features:**
+- 🔒 **Next up:** Authentication and authorization (API tokens, secure access)
 - Disk I/O and usage metrics
 - Network statistics and connection tracking
 - Process information and top consumers
@@ -43,6 +47,10 @@ make build
 ```
 
 The server will start on `http://localhost:8080` by default.
+
+> 💡 **Tip:** After starting GASP, install the bundled Claude Code skill to enable instant AI diagnostics: `claude-code skill install ./skill/gasp-diagnostics.skill`
+
+> ⚠️ **Remember:** This version has no authentication. Run only on trusted networks behind a firewall.
 
 ### Test the API
 
@@ -237,21 +245,131 @@ Different metrics are collected at different rates:
 - Docker/container hosts
 - Raspberry Pi / ARM devices
 
-## AI Integration Examples
+## AI Integration
 
-### Direct Usage
+### Claude Code Skill (Included!)
+
+GASP includes a **ready-to-use Claude Code skill** that enables instant, intelligent system diagnostics. Once GASP is running on your systems, Claude Code can automatically fetch metrics and provide expert-level analysis of your infrastructure.
+
+#### Installing the Skill
+
 ```bash
-# AI agent queries via curl
+# From the GASP repository root
+claude-code skill install ./skill/gasp-diagnostics.skill
+```
+
+Once installed, Claude Code can diagnose any GASP-enabled host on your network:
+
+**Natural language diagnostics:**
+- "Check hyperion for me"
+- "What's wrong with accelerated.local?"
+- "Compare my proxmox nodes"
+- "Is the dev server having memory issues?"
+- "Why is 192.168.1.100 slow?"
+
+#### What the Skill Does
+
+The `gasp-diagnostics` skill empowers Claude Code to:
+
+1. **Automatically fetch** metrics from any GASP-enabled host via HTTP
+2. **Intelligently analyze** system state using metric correlation and baselines
+3. **Identify issues** with context-aware pattern recognition (dev workstation vs server vs VM host)
+4. **Provide actionable recommendations** specific to the detected problem
+5. **Compare multiple hosts** to identify outliers and correlated issues
+6. **Understand system context** (desktop environments, container hosts, GPU workloads, etc.)
+
+**Example interaction:**
+```
+You: Check accelerated.local
+Claude: Fetching metrics from accelerated.local...
+
+Issue detected: Memory pressure at 8.2%. The postgres container started
+swapping 2 hours ago and is now using 12GB RAM (up from 4GB baseline).
+This likely indicates a query leak.
+
+Recommendation: Check recent queries and consider restarting the container.
+```
+
+The skill handles network topology automatically - works with mDNS (.local), DNS names, and IP addresses on your trusted network.
+
+#### Security Note for the Skill
+
+The skill connects to GASP instances on port 8080 by default. Since this version has no authentication, ensure:
+- GASP runs only on trusted internal networks
+- Firewall rules prevent external access to port 8080
+- You trust all hosts on the network where GASP is deployed
+
+### Direct API Usage
+
+For non-Claude AI agents or custom integrations:
+
+```bash
+# Fetch metrics via curl
 curl -s http://hyperion:8080/metrics | jq .
 
-# Multi-host collection
+# Multi-host collection script
 for host in hyperion proxmox1 proxmox2; do
   curl -s http://${host}:8080/metrics > /tmp/${host}.json
 done
 ```
 
-### Claude Code MCP Server (Planned)
-Future integration will expose GASP metrics via MCP tools for seamless Claude Code integration.
+### Future: MCP Server
+A Model Context Protocol (MCP) server is planned to provide even deeper integration with AI tools beyond Claude Code.
+
+## Project Roadmap
+
+GASP is under active development. Here's what's planned:
+
+### Phase 1: Security & Authentication (Next Priority)
+- **API token authentication** - Secure access control with token generation and validation
+- **Token management** - Utilities for creating, revoking, and rotating tokens
+- **Skill updates** - Update the bundled Claude Code skill to support authenticated requests
+- **TLS/HTTPS support** - Encrypted transport for production deployments
+- **Role-based access** - Read-only vs admin tokens for different use cases
+
+### Phase 2: Enhanced Metrics Collection
+- **Disk I/O monitoring** - IOPS, throughput, latency per device
+- **Network statistics** - Interface traffic, connections, bandwidth utilization
+- **Process information** - Top consumers, detailed process trees, resource tracking
+- **Systemd integration** - Unit states, failed services, restart tracking
+- **Journal log analysis** - Error rate trending, pattern detection, log correlation
+
+### Phase 3: Advanced Analysis
+- **Baseline learning** - 24-hour rolling baselines for anomaly detection
+- **Trend analysis** - Statistical deviation detection (2-sigma alerts)
+- **Predictive alerts** - Warning before resources are exhausted
+- **Persistent baselines** - Store learned behavior across restarts
+- **Seasonal patterns** - Weekday vs weekend, business hours vs off-hours
+
+### Phase 4: Desktop & GPU Support
+- **Desktop environment detection** - Hyprland, KDE, GNOME, Xorg, Wayland
+- **Active window tracking** - Context-aware resource attribution
+- **GPU monitoring** - NVIDIA (nvidia-smi), AMD (rocm-smi), Intel
+- **Per-process GPU usage** - GPU memory and utilization attribution
+- **Thermal monitoring** - Temperature tracking and throttling detection
+
+### Phase 5: Distribution & Deployment
+- **Packaging** - AUR (Arch), .deb (Debian/Ubuntu), .rpm (RHEL/Fedora)
+- **Systemd hardening** - Enhanced security directives and isolation
+- **Auto-installation** - One-command deployment scripts
+- **Docker image** - Containerized GASP for Docker hosts
+- **Configuration management** - YAML config file support, environment variable overrides
+
+### Phase 6: AI Tooling Ecosystem
+- **MCP server implementation** - Native Model Context Protocol support
+- **Multi-agent coordination** - Skills for fleet-wide diagnostics
+- **Historical data API** - Time-series metrics for trend analysis
+- **Alert webhooks** - Proactive notifications for critical issues
+- **Integration guides** - Documentation for other AI frameworks (LangChain, AutoGPT, etc.)
+
+### Future Considerations
+- Web UI for human consumption (low priority - AI-first focus maintained)
+- Plugin system for custom collectors
+- Remote host monitoring (agent-based deployment)
+- Kubernetes/container orchestration integration
+- Windows support (significant undertaking)
+
+> **Note:** This roadmap is subject to change based on user feedback and emerging requirements. The priority is to maintain GASP's core philosophy: AI-first monitoring with rich contextual output.
 
 ## License
 
