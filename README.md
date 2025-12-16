@@ -373,7 +373,7 @@ GASP is under active development. Here's what's planned:
 
 ## License
 
-To be determined (likely MIT or Apache 2.0)
+GASP is licensed under the [GNU General Public License v3.0](LICENSE). This ensures that GASP and any derivatives remain free and open source software.
 
 ## Contributing
 
