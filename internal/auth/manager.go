@@ -140,3 +140,76 @@ func (am *AuthManager) RevokeUserSessions(username string) (int, error) {
 func (am *AuthManager) GetActiveSessions() []*Session {
 	return am.sessions.GetAll()
 }
+
+// CheckUserLockout checks if a user is locked out
+func (am *AuthManager) CheckUserLockout(username string) (bool, time.Time) {
+	am.mu.RLock()
+	defer am.mu.RUnlock()
+
+	lockout, exists := am.userLockouts[username]
+	if !exists {
+		return false, time.Time{}
+	}
+
+	if lockout.IsLocked() {
+		return true, lockout.LockedUntil
+	}
+
+	return false, time.Time{}
+}
+
+// RecordFailedLogin records a failed login attempt
+func (am *AuthManager) RecordFailedLogin(username, clientIP string) (shouldLock bool, lockedUntil time.Time) {
+	am.mu.Lock()
+	defer am.mu.Unlock()
+
+	// Get or create lockout entry
+	lockout, exists := am.userLockouts[username]
+	if !exists {
+		lockout = &UserLockout{
+			Username:     username,
+			AttemptTimes: []time.Time{},
+		}
+		am.userLockouts[username] = lockout
+	}
+
+	// Cleanup old attempts (5 minute window by default)
+	windowDuration := 5 * time.Minute
+	if am.config.RateLimiting.FailedLogin.WindowDuration != "" {
+		if d, err := time.ParseDuration(am.config.RateLimiting.FailedLogin.WindowDuration); err == nil {
+			windowDuration = d
+		}
+	}
+	cleanupOldAttempts(lockout, windowDuration)
+
+	// Record attempt
+	recordFailedAttempt(lockout, clientIP)
+
+	// Check if should lock
+	maxAttempts := am.config.RateLimiting.FailedLogin.MaxAttempts
+	if shouldLockUser(lockout, maxAttempts) {
+		lockoutDuration, _ := time.ParseDuration(am.config.RateLimiting.FailedLogin.LockoutDuration)
+		lockUser(lockout, lockoutDuration)
+
+		// Save security state
+		go am.saveSecurityState()
+
+		return true, lockout.LockedUntil
+	}
+
+	return false, time.Time{}
+}
+
+// ClearUserLockout manually clears a user's lockout
+func (am *AuthManager) ClearUserLockout(username string) error {
+	am.mu.Lock()
+	defer am.mu.Unlock()
+
+	lockout, exists := am.userLockouts[username]
+	if !exists {
+		return fmt.Errorf("no lockout found for user %s", username)
+	}
+
+	clearLockout(lockout)
+	return am.saveSecurityState()
+}
