@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -71,9 +72,36 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO: Implement actual login logic with AuthManager
-	// For now, return error
-	writeInternalError(w, "not_implemented", "Authentication not yet fully implemented")
+	// Get TTL from config (default 7 days)
+	ttl := 7 * 24 * time.Hour
+	if s.config != nil && len(s.config.Auth.Passwords) > 0 {
+		ttl = s.config.Auth.Passwords[0].TokenTTLParsed
+	}
+
+	// Authenticate and create session
+	session, token, err := s.authManager.Login(username, password, clientIP, "gasp-cli", ttl)
+	if err != nil {
+		if strings.Contains(err.Error(), "locked out") {
+			writeUnauthorized(w, "user_locked_out", err.Error(), "wait_or_contact_admin")
+		} else {
+			writeUnauthorized(w, "invalid_credentials", "Authentication failed. Invalid username or password.", "verify_credentials")
+		}
+		return
+	}
+
+	// Return successful login response
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+
+	response := LoginResponse{
+		Token:      token,
+		TokenID:    fmt.Sprintf("%d", session.TokenID),
+		ExpiresAt:  session.ExpiresAt,
+		Username:   session.Username,
+		IssuedToIP: session.ClientIP,
+	}
+
+	json.NewEncoder(w).Encode(response)
 }
 
 // extractBearerToken extracts the Bearer token from Authorization header

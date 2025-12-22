@@ -2,7 +2,10 @@ package auth
 
 import (
 	"crypto/subtle"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -83,6 +86,42 @@ func (am *AuthManager) ValidateToken(tokenString, clientIP string) (*Session, er
 	return session, nil
 }
 
+// Login authenticates a user and creates a session
+func (am *AuthManager) Login(username, password, clientIP, clientID string, ttl time.Duration) (*Session, string, error) {
+	// Check if user is locked out
+	if locked, lockedUntil := am.CheckUserLockout(username); locked {
+		return nil, "", fmt.Errorf("user locked out until %v", lockedUntil)
+	}
+
+	// Authenticate via PAM
+	if err := am.pamAuth.Authenticate(username, password); err != nil {
+		// Record failed attempt
+		shouldLock, lockedUntil := am.RecordFailedLogin(username, clientIP)
+		if shouldLock {
+			return nil, "", fmt.Errorf("user locked out until %v after too many failed attempts", lockedUntil)
+		}
+		return nil, "", fmt.Errorf("authentication failed")
+	}
+
+	// Create session
+	session := NewSession(username, clientIP, clientID, ttl)
+	am.sessions.Create(session)
+
+	// Generate JWT token
+	token, err := am.tokenManager.GenerateToken(session)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to generate token: %w", err)
+	}
+
+	// Save sessions
+	if err := am.sessions.Save(); err != nil {
+		// Log but don't fail
+		fmt.Printf("Warning: failed to save sessions: %v\n", err)
+	}
+
+	return session, token, nil
+}
+
 // IsIPBlocked checks if an IP is blocked
 func (am *AuthManager) IsIPBlocked(ip string) bool {
 	am.mu.RLock()
@@ -108,14 +147,69 @@ func (am *AuthManager) BlockIP(ip, reason, username string, tokenID uint64) {
 	go am.saveSecurityState()
 }
 
-// Placeholder methods for persistence
+// SecurityState holds all security-related state for persistence
+type SecurityState struct {
+	BlockedIPs   map[string]*BlockedIP   `json:"blocked_ips"`
+	UserLockouts map[string]*UserLockout `json:"user_lockouts"`
+}
+
 func (am *AuthManager) loadSecurityState() error {
-	// TODO: Implement JSON loading
+	data, err := os.ReadFile(am.securityFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // File doesn't exist yet, that's okay
+		}
+		return fmt.Errorf("failed to read security state: %w", err)
+	}
+
+	var state SecurityState
+	if err := json.Unmarshal(data, &state); err != nil {
+		// Log warning but don't fail - start fresh
+		fmt.Printf("Warning: failed to unmarshal security state (starting fresh): %v\n", err)
+		return nil
+	}
+
+	// Restore state
+	if state.BlockedIPs != nil {
+		am.blockedIPs = state.BlockedIPs
+	}
+	if state.UserLockouts != nil {
+		am.userLockouts = state.UserLockouts
+	}
+
 	return nil
 }
 
 func (am *AuthManager) saveSecurityState() error {
-	// TODO: Implement JSON saving
+	am.mu.RLock()
+	defer am.mu.RUnlock()
+
+	state := SecurityState{
+		BlockedIPs:   am.blockedIPs,
+		UserLockouts: am.userLockouts,
+	}
+
+	// Create directory if needed
+	dir := filepath.Dir(am.securityFile)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("failed to create directory: %w", err)
+	}
+
+	// Atomic write (temp + rename)
+	tempFile := am.securityFile + ".tmp"
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal security state: %w", err)
+	}
+
+	if err := os.WriteFile(tempFile, data, 0600); err != nil {
+		return fmt.Errorf("failed to write security state: %w", err)
+	}
+
+	if err := os.Rename(tempFile, am.securityFile); err != nil {
+		return fmt.Errorf("failed to rename security state file: %w", err)
+	}
+
 	return nil
 }
 

@@ -9,12 +9,14 @@ import (
 
 	"github.com/accelerated-industries/gasp/internal/auth"
 	"github.com/accelerated-industries/gasp/internal/collectors"
+	"github.com/accelerated-industries/gasp/internal/config"
 )
 
 // Server represents the HTTP server
 type Server struct {
 	manager     *collectors.Manager
 	authManager *auth.AuthManager
+	config      *config.Config
 	version     string
 	port        int
 }
@@ -38,6 +40,11 @@ func NewServer(manager *collectors.Manager, config Config) *Server {
 // SetAuthManager sets the authentication manager
 func (s *Server) SetAuthManager(authManager *auth.AuthManager) {
 	s.authManager = authManager
+}
+
+// SetConfig sets the configuration
+func (s *Server) SetConfig(cfg *config.Config) {
+	s.config = cfg
 }
 
 // Start starts the HTTP server
