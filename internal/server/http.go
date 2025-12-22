@@ -7,14 +7,16 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/accelerated-industries/gasp/internal/auth"
 	"github.com/accelerated-industries/gasp/internal/collectors"
 )
 
 // Server represents the HTTP server
 type Server struct {
-	manager *collectors.Manager
-	version string
-	port    int
+	manager     *collectors.Manager
+	authManager *auth.AuthManager
+	version     string
+	port        int
 }
 
 // Config holds server configuration
@@ -26,10 +28,16 @@ type Config struct {
 // NewServer creates a new HTTP server
 func NewServer(manager *collectors.Manager, config Config) *Server {
 	return &Server{
-		manager: manager,
-		version: config.Version,
-		port:    config.Port,
+		manager:     manager,
+		authManager: nil, // Set separately via SetAuthManager
+		version:     config.Version,
+		port:        config.Port,
 	}
+}
+
+// SetAuthManager sets the authentication manager
+func (s *Server) SetAuthManager(authManager *auth.AuthManager) {
+	s.authManager = authManager
 }
 
 // Start starts the HTTP server
@@ -40,6 +48,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/metrics", s.handleMetrics)
 	mux.HandleFunc("/version", s.handleVersion)
+	mux.HandleFunc("/auth/login", s.handleLogin)
 
 	// Add CORS middleware
 	handler := corsMiddleware(mux)
