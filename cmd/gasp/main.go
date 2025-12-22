@@ -4,8 +4,11 @@ import (
 	"flag"
 	"log"
 	"os"
+	"path/filepath"
 
+	"github.com/accelerated-industries/gasp/internal/auth"
 	"github.com/accelerated-industries/gasp/internal/collectors"
+	"github.com/accelerated-industries/gasp/internal/config"
 	"github.com/accelerated-industries/gasp/internal/server"
 )
 
@@ -26,12 +29,32 @@ func main() {
 		os.Exit(0)
 	}
 
-	// TODO: Load configuration from file if specified
-	if *configFile != "" {
-		log.Printf("Configuration file support not yet implemented")
+	// Load configuration
+	var cfg *config.Config
+	var err error
+
+	configPath := *configFile
+	if configPath == "" {
+		// Default config path
+		home, err := os.UserHomeDir()
+		if err != nil {
+			log.Fatalf("Failed to get home directory: %v", err)
+		}
+		configPath = filepath.Join(home, ".config", "gasp", "config.yaml")
+	}
+
+	cfg, err = config.LoadConfig(configPath)
+	if err != nil {
+		log.Fatalf("Failed to load config from %s: %v", configPath, err)
+	}
+
+	// Validate configuration
+	if err := cfg.Validate(); err != nil {
+		log.Fatalf("Invalid configuration: %v", err)
 	}
 
 	log.Printf("Starting GASP v%s", version)
+	log.Printf("Loaded configuration from: %s", configPath)
 
 	// Create collector manager
 	manager, err := collectors.NewManager()
@@ -45,13 +68,55 @@ func main() {
 	manager.Register(collectors.NewMemoryCollector())
 	log.Println("Registered CPU and Memory collectors")
 
+	// Determine listen port from config or flag
+	listenPort := *port
+	if cfg.Server.ListenAddress != "" {
+		// Parse port from listen_address if specified
+		// For now, use flag-provided port
+		// TODO: Parse port from cfg.Server.ListenAddress
+	}
+
 	// Create and start HTTP server
 	serverConfig := server.Config{
-		Port:    *port,
+		Port:    listenPort,
 		Version: version,
 	}
 
 	srv := server.NewServer(manager, serverConfig)
+	srv.SetConfig(cfg)
+
+	// Initialize auth manager if auth is enabled
+	if cfg.Auth.Enabled {
+		// Determine state directory (XDG_STATE_HOME or ~/.local/state)
+		stateDir := os.Getenv("XDG_STATE_HOME")
+		if stateDir == "" {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				log.Fatalf("Failed to get home directory: %v", err)
+			}
+			stateDir = filepath.Join(home, ".local", "state", "gasp")
+		} else {
+			stateDir = filepath.Join(stateDir, "gasp")
+		}
+
+		// Create state directory if it doesn't exist
+		if err := os.MkdirAll(stateDir, 0700); err != nil {
+			log.Fatalf("Failed to create state directory %s: %v", stateDir, err)
+		}
+
+		sessionsFile := filepath.Join(stateDir, "sessions.json")
+		securityFile := filepath.Join(stateDir, "security-state.json")
+
+		authManager, err := auth.NewAuthManager(cfg, sessionsFile, securityFile)
+		if err != nil {
+			log.Fatalf("Failed to create auth manager: %v", err)
+		}
+
+		srv.SetAuthManager(authManager)
+		log.Println("Authentication enabled")
+	} else {
+		log.Println("Authentication disabled")
+	}
 
 	// Start server (blocking)
 	log.Fatal(srv.Start())

@@ -51,11 +51,13 @@ func (s *Server) SetConfig(cfg *config.Config) {
 func (s *Server) Start() error {
 	mux := http.NewServeMux()
 
-	// Register handlers
-	mux.HandleFunc("/health", s.handleHealth)
-	mux.HandleFunc("/metrics", s.handleMetrics)
-	mux.HandleFunc("/version", s.handleVersion)
+	// Register public endpoints (no auth required)
 	mux.HandleFunc("/auth/login", s.handleLogin)
+	mux.HandleFunc("/version", s.handleVersion)
+
+	// Register protected endpoints (auth required unless localhost bypass)
+	mux.Handle("/health", s.RequireAuth(http.HandlerFunc(s.handleHealth)))
+	mux.Handle("/metrics", s.RequireAuth(http.HandlerFunc(s.handleMetrics)))
 
 	// Add CORS middleware
 	handler := corsMiddleware(mux)
