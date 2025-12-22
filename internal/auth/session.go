@@ -36,6 +36,16 @@ func (s *Session) IsExpired() bool {
 }
 
 // generateTokenID generates a cryptographically secure random 64-bit token ID
+//
+// The function uses crypto/rand to generate a cryptographically secure random
+// 64-bit token ID. If crypto/rand fails (which should never happen on properly
+// configured Linux systems), it falls back to time.Now().UnixNano().
+//
+// Note: The fallback path is not tested because:
+// 1. crypto/rand.Read() cannot fail on properly configured Linux systems
+// 2. Forcing crypto/rand to fail would require monkey-patching or OS-level manipulation
+// 3. The fallback exists only as a safety measure for catastrophic system failures
+// 4. Testing the fallback would require invasive mocking that reduces test value
 func generateTokenID() uint64 {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {

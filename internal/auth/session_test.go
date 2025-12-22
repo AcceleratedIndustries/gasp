@@ -57,3 +57,54 @@ func TestSessionIsExpired(t *testing.T) {
 		t.Error("Expected session to be valid")
 	}
 }
+
+func TestUserLockoutIsLocked(t *testing.T) {
+	// Test locked user (LockedUntil in the future)
+	lockedUser := &UserLockout{
+		Username:    "locked",
+		LockedUntil: time.Now().Add(1 * time.Hour),
+	}
+
+	if !lockedUser.IsLocked() {
+		t.Error("Expected user to be locked (LockedUntil in future)")
+	}
+
+	// Test unlocked user (LockedUntil in the past)
+	unlockedUser := &UserLockout{
+		Username:    "unlocked",
+		LockedUntil: time.Now().Add(-1 * time.Hour),
+	}
+
+	if unlockedUser.IsLocked() {
+		t.Error("Expected user to be unlocked (LockedUntil in past)")
+	}
+
+	// Test user with zero LockedUntil
+	neverLockedUser := &UserLockout{
+		Username:    "neverlocked",
+		LockedUntil: time.Time{},
+	}
+
+	if neverLockedUser.IsLocked() {
+		t.Error("Expected user to be unlocked (zero LockedUntil)")
+	}
+}
+
+func TestTokenIDUniqueness(t *testing.T) {
+	const iterations = 1000
+	seenIDs := make(map[uint64]bool, iterations)
+
+	for i := 0; i < iterations; i++ {
+		session := NewSession("testuser", "192.168.1.100", "gasp-cli", 24*time.Hour)
+
+		if seenIDs[session.TokenID] {
+			t.Errorf("Token ID collision detected: %d appeared more than once", session.TokenID)
+		}
+
+		seenIDs[session.TokenID] = true
+	}
+
+	if len(seenIDs) != iterations {
+		t.Errorf("Expected %d unique token IDs, got %d", iterations, len(seenIDs))
+	}
+}
