@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"unicode"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -21,10 +22,30 @@ func NewPAMAuthenticator() *PAMAuthenticator {
 	}
 }
 
-// Authenticate validates credentials via pwauth
-func (p *PAMAuthenticator) Authenticate(username, password string) error {
+// ValidateCredentials rejects credentials that are empty or could change
+// what pwauth reads. pwauth takes "username\npassword\n" on stdin, so a
+// username like "root\nGUESS" would check root's password while lockout
+// was tracked under a different key. Usernames may not contain any control
+// character; passwords may not contain CR, LF or NUL.
+func ValidateCredentials(username, password string) error {
 	if username == "" || password == "" {
 		return fmt.Errorf("username and password are required")
+	}
+	for _, r := range username {
+		if unicode.IsControl(r) {
+			return fmt.Errorf("username contains invalid characters")
+		}
+	}
+	if strings.ContainsAny(password, "\r\n\x00") {
+		return fmt.Errorf("password contains invalid characters")
+	}
+	return nil
+}
+
+// Authenticate validates credentials via pwauth
+func (p *PAMAuthenticator) Authenticate(username, password string) error {
+	if err := ValidateCredentials(username, password); err != nil {
+		return err
 	}
 
 	// Check if pwauth exists

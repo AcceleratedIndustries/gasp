@@ -117,3 +117,34 @@ func TestExtractClientIP(t *testing.T) {
 		}
 	}
 }
+
+func TestHandleLogin_RejectsControlCharacters(t *testing.T) {
+	srv := newTestServerWithBlockedIPs(t)
+
+	bodies := []string{
+		`{"username":"root\nGUESS","password":"x"}`,
+		`{"username":"root\r","password":"x"}`,
+		`{"username":"root\u0000","password":"x"}`,
+		`{"username":"root","password":"guess\nextra"}`,
+	}
+
+	for _, body := range bodies {
+		req := httptest.NewRequest(http.MethodPost, "/auth/login", strings.NewReader(body))
+		req.RemoteAddr = "192.168.1.100:51234"
+		w := httptest.NewRecorder()
+
+		srv.handleLogin(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("Body %s: expected 400, got %d: %s", body, w.Code, w.Body.String())
+			continue
+		}
+		var resp ErrorResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("Failed to decode response: %v", err)
+		}
+		if resp.Error != "malformed_request" {
+			t.Errorf("Body %s: expected malformed_request, got %q", body, resp.Error)
+		}
+	}
+}

@@ -94,6 +94,12 @@ func (am *AuthManager) ValidateToken(tokenString, clientIP string) (*Session, er
 
 // Login authenticates a user and creates a session
 func (am *AuthManager) Login(username, password, clientIP, clientID string, ttl time.Duration) (*Session, string, error) {
+	// Reject malformed credentials before lockout checks, so every attempt
+	// is counted against the username pwauth actually checks
+	if err := ValidateCredentials(username, password); err != nil {
+		return nil, "", fmt.Errorf("invalid credentials format: %w", err)
+	}
+
 	// Check if user is locked out
 	if locked, lockedUntil := am.CheckUserLockout(username); locked {
 		return nil, "", fmt.Errorf("user locked out until %v", lockedUntil)

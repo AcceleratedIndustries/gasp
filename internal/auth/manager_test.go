@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -335,5 +336,103 @@ func TestAuthManager_ConcurrentSecurityStateSaves(t *testing.T) {
 	}
 	if len(leftovers) > 0 {
 		t.Errorf("Temp files left behind: %v", leftovers)
+	}
+}
+
+// writeFakePwauth writes a pwauth stand-in that records its stdin to
+// stdinFile and always rejects the credentials.
+func writeFakePwauth(t *testing.T, dir, stdinFile string) string {
+	t.Helper()
+	script := filepath.Join(dir, "fake-pwauth")
+	body := "#!/bin/sh\ncat >> '" + stdinFile + "'\nexit 1\n"
+	if err := os.WriteFile(script, []byte(body), 0700); err != nil {
+		t.Fatalf("Failed to write fake pwauth: %v", err)
+	}
+	return script
+}
+
+func TestAuthManager_LoginRejectsControlCharacters(t *testing.T) {
+	if _, err := exec.LookPath("/bin/sh"); err != nil {
+		t.Skip("/bin/sh not available for fake pwauth")
+	}
+
+	tmpDir := t.TempDir()
+	secretFile := filepath.Join(tmpDir, "jwt-secret")
+	secret := []byte("test-secret-key-at-least-32-chars-long-12345")
+	if err := os.WriteFile(secretFile, secret, 0600); err != nil {
+		t.Fatalf("Failed to write secret: %v", err)
+	}
+
+	cfg := &config.Config{
+		Auth: config.AuthConfig{
+			Enabled: true,
+			JWT: config.JWTConfig{
+				SecretFile: secretFile,
+			},
+		},
+		RateLimiting: config.RateLimitingConfig{
+			FailedLogin: config.FailedLoginConfig{
+				MaxAttempts:     5,
+				LockoutDuration: "15m",
+			},
+		},
+	}
+
+	manager, err := NewAuthManager(cfg, filepath.Join(tmpDir, "sessions.json"), filepath.Join(tmpDir, "security.json"))
+	if err != nil {
+		t.Fatalf("Failed to create auth manager: %v", err)
+	}
+	t.Cleanup(manager.waitForBackgroundSaves)
+
+	stdinFile := filepath.Join(tmpDir, "pwauth-stdin")
+	manager.pamAuth.pwauthPath = writeFakePwauth(t, tmpDir, stdinFile)
+
+	// Each of these would make pwauth check root's password while lockout
+	// was tracked under a fresh key, allowing unlimited guesses.
+	bad := []struct{ username, password string }{
+		{"root\nGUESS1", "x"},
+		{"root\rGUESS2", "x"},
+		{"root\x00", "x"},
+		{"root", "GUESS3\nextra"},
+	}
+	for _, c := range bad {
+		if _, _, err := manager.Login(c.username, c.password, "192.168.1.100", "gasp-cli", time.Hour); err == nil {
+			t.Errorf("Login(%q, %q) succeeded, expected rejection", c.username, c.password)
+		}
+	}
+
+	if _, err := os.Stat(stdinFile); !os.IsNotExist(err) {
+		data, _ := os.ReadFile(stdinFile)
+		t.Fatalf("pwauth must not run for malformed credentials, got stdin %q", data)
+	}
+
+	manager.mu.RLock()
+	lockouts := len(manager.userLockouts)
+	manager.mu.RUnlock()
+	if lockouts != 0 {
+		t.Errorf("Malformed credentials must not create lockout entries, got %d", lockouts)
+	}
+
+	// A normal failed login does reach pwauth with exactly two lines, and
+	// counts against the real username.
+	if _, _, err := manager.Login("root", "wrong", "192.168.1.100", "gasp-cli", time.Hour); err == nil {
+		t.Fatal("Expected login with wrong password to fail")
+	}
+	data, err := os.ReadFile(stdinFile)
+	if err != nil {
+		t.Fatalf("Expected fake pwauth to run for valid input: %v", err)
+	}
+	if got := string(data); got != "root\nwrong\n" {
+		t.Errorf("pwauth stdin = %q, want %q", got, "root\nwrong\n")
+	}
+	if strings.Count(string(data), "\n") != 2 {
+		t.Errorf("pwauth stdin should have exactly two lines, got %q", data)
+	}
+
+	manager.mu.RLock()
+	_, counted := manager.userLockouts["root"]
+	manager.mu.RUnlock()
+	if !counted {
+		t.Error("Failed login should be counted against user root")
 	}
 }
