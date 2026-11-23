@@ -35,8 +35,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Extract client IP
-	clientIP := strings.Split(r.RemoteAddr, ":")[0]
+	// Extract client IP the same way RequireAuth does, so the IP bound to
+	// the session matches the IP seen on later requests (IPv6 included)
+	clientIP := extractClientIP(r.RemoteAddr)
 
 	// Check if IP is blocked
 	if s.authManager != nil && s.authManager.IsIPBlocked(clientIP) {
