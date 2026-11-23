@@ -22,6 +22,12 @@ type AuthManager struct {
 	userLockouts   map[string]*UserLockout
 	securityFile   string
 	mu             sync.RWMutex
+
+	// saveMu serializes writes of the security state file so concurrent
+	// saves can't clobber each other's temp file or land out of order.
+	saveMu sync.Mutex
+	// saveWG tracks background saves started by saveSecurityStateAsync.
+	saveWG sync.WaitGroup
 }
 
 // NewAuthManager creates a new authentication manager
@@ -144,7 +150,7 @@ func (am *AuthManager) BlockIP(ip, reason, username string, tokenID uint64) {
 	}
 
 	// Save security state
-	go am.saveSecurityState()
+	am.saveSecurityStateAsync()
 }
 
 // SecurityState holds all security-related state for persistence
@@ -180,13 +186,38 @@ func (am *AuthManager) loadSecurityState() error {
 	return nil
 }
 
-func (am *AuthManager) saveSecurityState() error {
-	am.mu.RLock()
-	defer am.mu.RUnlock()
+// saveSecurityStateAsync saves the security state in the background.
+// Callers may hold am.mu; the save waits for it to be released.
+func (am *AuthManager) saveSecurityStateAsync() {
+	am.saveWG.Add(1)
+	go func() {
+		defer am.saveWG.Done()
+		if err := am.saveSecurityState(); err != nil {
+			fmt.Printf("Warning: failed to save security state: %v\n", err)
+		}
+	}()
+}
 
+// waitForBackgroundSaves blocks until all background saves have finished.
+func (am *AuthManager) waitForBackgroundSaves() {
+	am.saveWG.Wait()
+}
+
+func (am *AuthManager) saveSecurityState() error {
+	// Hold saveMu across snapshot and write, so each save captures state at
+	// least as new as the one before it and the last write wins.
+	am.saveMu.Lock()
+	defer am.saveMu.Unlock()
+
+	am.mu.RLock()
 	state := SecurityState{
 		BlockedIPs:   am.blockedIPs,
 		UserLockouts: am.userLockouts,
+	}
+	data, err := json.MarshalIndent(state, "", "  ")
+	am.mu.RUnlock()
+	if err != nil {
+		return fmt.Errorf("failed to marshal security state: %w", err)
 	}
 
 	// Create directory if needed
@@ -195,15 +226,24 @@ func (am *AuthManager) saveSecurityState() error {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	// Atomic write (temp + rename)
-	tempFile := am.securityFile + ".tmp"
-	data, err := json.MarshalIndent(state, "", "  ")
+	// Atomic write: unique temp file in the same directory, then rename
+	tmp, err := os.CreateTemp(dir, filepath.Base(am.securityFile)+".*.tmp")
 	if err != nil {
-		return fmt.Errorf("failed to marshal security state: %w", err)
+		return fmt.Errorf("failed to create temp security state file: %w", err)
 	}
+	tempFile := tmp.Name()
+	defer os.Remove(tempFile) // no-op once the rename succeeds
 
-	if err := os.WriteFile(tempFile, data, 0600); err != nil {
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
 		return fmt.Errorf("failed to write security state: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("failed to sync security state: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("failed to close security state file: %w", err)
 	}
 
 	if err := os.Rename(tempFile, am.securityFile); err != nil {
@@ -286,7 +326,7 @@ func (am *AuthManager) RecordFailedLogin(username, clientIP string) (shouldLock 
 		lockUser(lockout, lockoutDuration)
 
 		// Save security state
-		go am.saveSecurityState()
+		am.saveSecurityStateAsync()
 
 		return true, lockout.LockedUntil
 	}
