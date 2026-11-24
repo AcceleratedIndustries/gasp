@@ -664,3 +664,62 @@ func TestAuthManager_IsSourceAllowed(t *testing.T) {
 		}
 	}
 }
+
+func TestAuthManager_LockoutMapStaysBounded(t *testing.T) {
+	t.Run("stale entries are pruned", func(t *testing.T) {
+		manager, _, _ := newTestManager(t, config.FailedLoginConfig{
+			MaxAttempts:    100,
+			WindowDuration: "50ms",
+		})
+
+		for i := 0; i < 3000; i++ {
+			manager.RecordFailedLogin(fmt.Sprintf("junk%d", i), "203.0.113.9")
+		}
+		time.Sleep(100 * time.Millisecond)
+		manager.RecordFailedLogin("one-more", "203.0.113.9")
+
+		manager.mu.RLock()
+		n := len(manager.userLockouts)
+		manager.mu.RUnlock()
+		if n > lockoutPruneThreshold {
+			t.Errorf("Expected stale entries to be pruned, still tracking %d usernames", n)
+		}
+	})
+
+	t.Run("locked and recent entries are kept", func(t *testing.T) {
+		manager, _, _ := newTestManager(t, config.FailedLoginConfig{
+			MaxAttempts:    5,
+			WindowDuration: "5m",
+		})
+
+		old := time.Now().Add(-time.Hour)
+		manager.mu.Lock()
+		for i := 0; i < lockoutPruneThreshold; i++ {
+			name := fmt.Sprintf("stale%d", i)
+			manager.userLockouts[name] = &UserLockout{Username: name, AttemptTimes: []time.Time{old}}
+		}
+		manager.userLockouts["locked"] = &UserLockout{
+			Username: "locked", AttemptTimes: []time.Time{old}, LockedUntil: time.Now().Add(time.Hour),
+		}
+		manager.userLockouts["recent"] = &UserLockout{
+			Username: "recent", AttemptTimes: []time.Time{time.Now()}, FailedAttempts: 1,
+		}
+		manager.mu.Unlock()
+
+		manager.RecordFailedLogin("one-more", "203.0.113.9")
+
+		manager.mu.RLock()
+		defer manager.mu.RUnlock()
+		for _, name := range []string{"locked", "recent", "one-more"} {
+			if _, ok := manager.userLockouts[name]; !ok {
+				t.Errorf("%s should be kept", name)
+			}
+		}
+		if _, ok := manager.userLockouts["stale0"]; ok {
+			t.Error("stale entries should be pruned")
+		}
+		if n := len(manager.userLockouts); n != 3 {
+			t.Errorf("Expected 3 entries after pruning, got %d", n)
+		}
+	})
+}

@@ -341,9 +341,16 @@ func (am *AuthManager) RecordFailedLogin(username, clientIP string) (shouldLock 
 	am.mu.Lock()
 	defer am.mu.Unlock()
 
+	maxAttempts, lockoutDuration, windowDuration := am.failedLoginPolicy()
+
 	// Get or create lockout entry
 	lockout, exists := am.userLockouts[username]
 	if !exists {
+		// Every distinct username tried gets an entry, so drop stale ones
+		// before the map (and the saved file) can grow without bound
+		if len(am.userLockouts) >= lockoutPruneThreshold {
+			am.pruneStaleLockoutsLocked(windowDuration)
+		}
 		lockout = &UserLockout{
 			Username:     username,
 			AttemptTimes: []time.Time{},
@@ -351,7 +358,6 @@ func (am *AuthManager) RecordFailedLogin(username, clientIP string) (shouldLock 
 		am.userLockouts[username] = lockout
 	}
 
-	maxAttempts, lockoutDuration, windowDuration := am.failedLoginPolicy()
 	cleanupOldAttempts(lockout, windowDuration)
 
 	// Record attempt
@@ -368,6 +374,32 @@ func (am *AuthManager) RecordFailedLogin(username, clientIP string) (shouldLock 
 	}
 
 	return false, time.Time{}
+}
+
+// lockoutPruneThreshold is the number of tracked usernames above which
+// stale entries are pruned when a new username fails to log in
+const lockoutPruneThreshold = 1024
+
+// pruneStaleLockoutsLocked removes entries that are not locked and have no
+// failed attempts inside the window, since they can't affect any future
+// lockout decision. The caller must hold am.mu for writing.
+func (am *AuthManager) pruneStaleLockoutsLocked(window time.Duration) {
+	cutoff := time.Now().Add(-window)
+	for name, lockout := range am.userLockouts {
+		if lockout.IsLocked() {
+			continue
+		}
+		recent := false
+		for _, t := range lockout.AttemptTimes {
+			if t.After(cutoff) {
+				recent = true
+				break
+			}
+		}
+		if !recent {
+			delete(am.userLockouts, name)
+		}
+	}
 }
 
 // Default failed-login policy, used for any rate_limiting.failed_login
