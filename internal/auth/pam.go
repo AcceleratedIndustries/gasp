@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os/exec"
 	"strings"
 	"time"
@@ -125,28 +126,27 @@ func VerifyPassword(password, hash string) bool {
 	return err == nil
 }
 
-// IsIPInCIDR checks if an IP address is in a CIDR range
+// IsIPInCIDR reports whether ip matches cidr, which may be a single address
+// ("192.168.1.5", "2001:db8::1") or a network ("192.168.1.0/24",
+// "2001:db8::/32"). IPv4-mapped IPv6 addresses match IPv4 networks.
 func IsIPInCIDR(ip, cidr string) (bool, error) {
-	// Simple implementation for exact IP match or CIDR
-	// For production, use net.ParseCIDR and ip.Contains
-
-	// Exact match
-	if ip == cidr {
-		return true, nil
+	addr, err := netip.ParseAddr(ip)
+	if err != nil {
+		return false, fmt.Errorf("invalid IP address %q: %w", ip, err)
 	}
+	addr = addr.WithZone("").Unmap()
 
-	// CIDR match - simplified (production should use net package)
 	if strings.Contains(cidr, "/") {
-		parts := strings.Split(cidr, "/")
-		network := parts[0]
-
-		// Simple prefix match for /24
-		if strings.HasSuffix(cidr, "/24") {
-			ipPrefix := strings.Join(strings.Split(ip, ".")[:3], ".")
-			networkPrefix := strings.Join(strings.Split(network, ".")[:3], ".")
-			return ipPrefix == networkPrefix, nil
+		prefix, err := netip.ParsePrefix(cidr)
+		if err != nil {
+			return false, fmt.Errorf("invalid CIDR %q: %w", cidr, err)
 		}
+		return prefix.Contains(addr), nil
 	}
 
-	return false, nil
+	other, err := netip.ParseAddr(cidr)
+	if err != nil {
+		return false, fmt.Errorf("invalid IP address %q: %w", cidr, err)
+	}
+	return addr == other.WithZone("").Unmap(), nil
 }

@@ -83,3 +83,44 @@ func TestValidateCredentials(t *testing.T) {
 		})
 	}
 }
+
+func TestIsIPInCIDR(t *testing.T) {
+	tests := []struct {
+		ip, cidr string
+		want     bool
+		wantErr  bool
+	}{
+		{"192.168.1.5", "192.168.1.5", true, false},
+		{"192.168.1.5", "192.168.1.6", false, false},
+		{"192.168.1.5", "192.168.1.0/24", true, false},
+		{"192.168.2.5", "192.168.1.0/24", false, false},
+		{"10.20.30.40", "10.0.0.0/8", true, false},
+		{"172.16.5.4", "172.16.0.0/12", true, false},
+		{"172.32.0.1", "172.16.0.0/12", false, false},
+		{"192.168.1.5", "192.168.1.5/32", true, false},
+		{"8.8.8.8", "0.0.0.0/0", true, false},
+		{"2001:db8::5", "2001:db8::/32", true, false},
+		{"2001:db9::5", "2001:db8::/32", false, false},
+		{"::1", "::1", true, false},
+		{"fe80::1%eth0", "fe80::/10", true, false},
+		{"::ffff:192.168.1.5", "192.168.1.0/24", true, false},
+		// Families don't cross-match, and IPv6 input no longer panics.
+		{"::1", "192.168.1.0/24", false, false},
+		{"192.168.1.5", "2001:db8::/32", false, false},
+		// Invalid input is an error, not a panic or a match.
+		{"not-an-ip", "192.168.1.0/24", false, true},
+		{"192.168.1.5", "192.168.1.0/33", false, true},
+		{"192.168.1.5", "garbage", false, true},
+		{"", "", false, true},
+	}
+
+	for _, tt := range tests {
+		got, err := IsIPInCIDR(tt.ip, tt.cidr)
+		if (err != nil) != tt.wantErr {
+			t.Errorf("IsIPInCIDR(%q, %q) error = %v, wantErr %v", tt.ip, tt.cidr, err, tt.wantErr)
+		}
+		if got != tt.want {
+			t.Errorf("IsIPInCIDR(%q, %q) = %v, want %v", tt.ip, tt.cidr, got, tt.want)
+		}
+	}
+}
