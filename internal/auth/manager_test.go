@@ -122,7 +122,7 @@ func TestAuthManager_IPBindingViolation(t *testing.T) {
 		t.Fatalf("Failed to create auth manager: %v", err)
 	}
 
-	t.Cleanup(manager.waitForBackgroundSaves)
+	t.Cleanup(manager.Flush)
 
 	// Create session for one IP
 	session := NewSession("testuser", "192.168.1.100", "gasp-cli", 24*time.Hour)
@@ -220,7 +220,7 @@ func TestAuthManager_SecurityStatePersistence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create auth manager: %v", err)
 	}
-	t.Cleanup(manager1.waitForBackgroundSaves)
+	t.Cleanup(manager1.Flush)
 
 	// Block an IP
 	manager1.BlockIP("192.168.1.200", "test_block", "testuser", 12345)
@@ -283,7 +283,7 @@ func TestAuthManager_ConcurrentSecurityStateSaves(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create auth manager: %v", err)
 	}
-	t.Cleanup(manager.waitForBackgroundSaves)
+	t.Cleanup(manager.Flush)
 
 	// Every BlockIP and every locking RecordFailedLogin starts a background
 	// save, and direct saves run alongside them. None may fail.
@@ -313,7 +313,7 @@ func TestAuthManager_ConcurrentSecurityStateSaves(t *testing.T) {
 		}
 	}
 
-	manager.waitForBackgroundSaves()
+	manager.Flush()
 
 	// The file on disk must hold the final state.
 	reloaded, err := NewAuthManager(cfg, sessionsFile, securityFile)
@@ -382,7 +382,7 @@ func TestAuthManager_LoginRejectsControlCharacters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create auth manager: %v", err)
 	}
-	t.Cleanup(manager.waitForBackgroundSaves)
+	t.Cleanup(manager.Flush)
 
 	stdinFile := filepath.Join(tmpDir, "pwauth-stdin")
 	manager.pamAuth.pwauthPath = writeFakePwauth(t, tmpDir, stdinFile)
@@ -462,7 +462,7 @@ func newTestManager(t *testing.T, failedLogin config.FailedLoginConfig) (*AuthMa
 	if err != nil {
 		t.Fatalf("Failed to create auth manager: %v", err)
 	}
-	t.Cleanup(manager.waitForBackgroundSaves)
+	t.Cleanup(manager.Flush)
 	return manager, cfg, tmpDir
 }
 
@@ -500,7 +500,7 @@ func TestAuthManager_ClearUserLockout(t *testing.T) {
 	}
 
 	// The cleared state must be on disk.
-	manager.waitForBackgroundSaves()
+	manager.Flush()
 	reloaded, err := NewAuthManager(cfg, filepath.Join(tmpDir, "sessions.json"), filepath.Join(tmpDir, "security.json"))
 	if err != nil {
 		t.Fatalf("Failed to reload auth manager: %v", err)

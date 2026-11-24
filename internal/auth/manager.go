@@ -53,6 +53,10 @@ func NewAuthManager(cfg *config.Config, sessionsFile, securityFile string) (*Aut
 		securityFile: securityFile,
 	}
 
+	if cfg.Auth.PwauthPath != "" {
+		manager.pamAuth.pwauthPath = cfg.Auth.PwauthPath
+	}
+
 	// Load security state
 	if err := manager.loadSecurityState(); err != nil {
 		fmt.Printf("Warning: failed to load security state: %v\n", err)
@@ -204,8 +208,9 @@ func (am *AuthManager) saveSecurityStateAsync() {
 	}()
 }
 
-// waitForBackgroundSaves blocks until all background saves have finished.
-func (am *AuthManager) waitForBackgroundSaves() {
+// Flush blocks until all background saves of the security state have
+// finished. Call it before shutdown, or in tests before removing state files.
+func (am *AuthManager) Flush() {
 	am.saveWG.Wait()
 }
 

@@ -47,8 +47,8 @@ func (s *Server) SetConfig(cfg *config.Config) {
 	s.config = cfg
 }
 
-// Start starts the HTTP server
-func (s *Server) Start() error {
+// Handler returns the server's HTTP handler with all routes registered
+func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	// Register public endpoints (no auth required)
@@ -60,7 +60,12 @@ func (s *Server) Start() error {
 	mux.Handle("/metrics", s.RequireAuth(http.HandlerFunc(s.handleMetrics)))
 
 	// Add CORS middleware
-	handler := corsMiddleware(mux)
+	return corsMiddleware(mux)
+}
+
+// Start starts the HTTP server
+func (s *Server) Start() error {
+	handler := s.Handler()
 
 	addr := fmt.Sprintf(":%d", s.port)
 	log.Printf("Starting GASP server on %s", addr)

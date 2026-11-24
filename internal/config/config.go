@@ -33,6 +33,8 @@ type AuthConfig struct {
 	LocalhostBypass bool             `yaml:"localhost_bypass"`
 	Passwords       []PasswordConfig `yaml:"passwords"`
 	JWT             JWTConfig        `yaml:"jwt"`
+	// PwauthPath overrides the pwauth helper location (default /usr/bin/pwauth)
+	PwauthPath string `yaml:"pwauth_path,omitempty"`
 }
 
 type PasswordConfig struct {
@@ -130,6 +132,9 @@ func LoadConfig(path string) (*Config, error) {
 	// Expand paths in config
 	if cfg.Auth.JWT.SecretFile != "" {
 		cfg.Auth.JWT.SecretFile = ExpandPath(cfg.Auth.JWT.SecretFile)
+	}
+	if cfg.Auth.PwauthPath != "" {
+		cfg.Auth.PwauthPath = ExpandPath(cfg.Auth.PwauthPath)
 	}
 	if cfg.Logging.File != "" {
 		cfg.Logging.File = ExpandPath(cfg.Logging.File)
