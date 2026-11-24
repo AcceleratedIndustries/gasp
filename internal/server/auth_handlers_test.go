@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -61,10 +62,12 @@ func TestHandleLogin_BlockedIPIsRecognized(t *testing.T) {
 		name       string
 		remoteAddr string
 		blockedIP  string
+		proxied    bool
 	}{
-		{"IPv4", "192.168.1.200:51234", "192.168.1.200"},
-		{"IPv6", "[2001:db8::5]:51234", "2001:db8::5"},
-		{"IPv6 loopback", "[::1]:51234", "::1"},
+		{"IPv4", "192.168.1.200:51234", "192.168.1.200", false},
+		{"IPv6", "[2001:db8::5]:51234", "2001:db8::5", false},
+		// Direct localhost requests are exempt from blocks, but proxied ones are not
+		{"IPv6 loopback through a proxy", "[::1]:51234", "::1", true},
 	}
 
 	for _, tt := range tests {
@@ -74,6 +77,9 @@ func TestHandleLogin_BlockedIPIsRecognized(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "/auth/login",
 				strings.NewReader(`{"username":"alice","password":"secret"}`))
 			req.RemoteAddr = tt.remoteAddr
+			if tt.proxied {
+				req.Header.Set("X-Forwarded-For", "198.51.100.7")
+			}
 			w := httptest.NewRecorder()
 
 			srv.handleLogin(w, req)
@@ -146,5 +152,130 @@ func TestHandleLogin_RejectsControlCharacters(t *testing.T) {
 		if resp.Error != "malformed_request" {
 			t.Errorf("Body %s: expected malformed_request, got %q", body, resp.Error)
 		}
+	}
+}
+
+func TestRequireAuth_BlockedIPDeniedOnProtectedRoutes(t *testing.T) {
+	tests := []struct {
+		name       string
+		remoteAddr string
+		blockedIP  string
+		bypass     bool
+	}{
+		{"remote IPv4", "192.168.1.66:40000", "192.168.1.66", false},
+		{"remote IPv6", "[2001:db8::66]:40000", "2001:db8::66", false},
+		{"proxied localhost with bypass on", "127.0.0.1:40000", "127.0.0.1", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newTestServerWithBlockedIPs(t, tt.blockedIP)
+			srv.config.Auth.LocalhostBypass = tt.bypass
+			h := srv.Handler()
+
+			for _, path := range []string{"/health", "/metrics"} {
+				req := httptest.NewRequest(http.MethodGet, path, nil)
+				req.RemoteAddr = tt.remoteAddr
+				req.Header.Set("Authorization", "Bearer some-token")
+				if tt.bypass {
+					req.Header.Set("X-Forwarded-For", "198.51.100.7")
+				}
+				w := httptest.NewRecorder()
+				h.ServeHTTP(w, req)
+
+				if w.Code != http.StatusForbidden {
+					t.Fatalf("%s: expected 403, got %d: %s", path, w.Code, w.Body.String())
+				}
+				var resp ErrorResponse
+				if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+					t.Fatalf("Failed to decode response: %v", err)
+				}
+				if resp.Error != "ip_blocked" {
+					t.Errorf("%s: expected ip_blocked, got %q", path, resp.Error)
+				}
+			}
+		})
+	}
+}
+
+func TestHandleLogin_WithoutAuthManager(t *testing.T) {
+	tests := []struct {
+		name     string
+		srv      *Server
+		wantCode int
+		wantErr  string
+	}{
+		{"auth disabled", &Server{config: &config.Config{}}, http.StatusNotFound, "authentication_disabled"},
+		{"no config", &Server{}, http.StatusNotFound, "authentication_disabled"},
+		{"auth enabled but no manager", &Server{config: &config.Config{Auth: config.AuthConfig{Enabled: true}}},
+			http.StatusServiceUnavailable, "authentication_service_unavailable"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/auth/login",
+				strings.NewReader(`{"username":"alice","password":"secret"}`))
+			req.RemoteAddr = "192.168.1.100:51234"
+			w := httptest.NewRecorder()
+
+			tt.srv.Handler().ServeHTTP(w, req)
+
+			if w.Code != tt.wantCode {
+				t.Fatalf("Expected %d, got %d: %s", tt.wantCode, w.Code, w.Body.String())
+			}
+			var resp ErrorResponse
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("Expected a JSON error, got %q", w.Body.String())
+			}
+			if resp.Error != tt.wantErr {
+				t.Errorf("Expected %s, got %q", tt.wantErr, resp.Error)
+			}
+		})
+	}
+}
+
+func TestDisplayURL(t *testing.T) {
+	tests := map[string]string{
+		":8080":          "http://localhost:8080",
+		"0.0.0.0:8080":   "http://localhost:8080",
+		"127.0.0.1:9090": "http://127.0.0.1:9090",
+		"[::1]:9090":     "http://[::1]:9090",
+	}
+	for addr, want := range tests {
+		if got := displayURL(addr); got != want {
+			t.Errorf("displayURL(%q) = %q, want %q", addr, got, want)
+		}
+	}
+}
+
+// Direct requests from the GASP host itself are never refused as blocked,
+// so an admin on that machine can't be locked out
+func TestBlockedIP_LocalhostExempt(t *testing.T) {
+	for _, ip := range []string{"127.0.0.1", "::1"} {
+		t.Run(ip, func(t *testing.T) {
+			remote := net.JoinHostPort(ip, "40000")
+			srv := newTestServerWithBlockedIPs(t, ip)
+			srv.config.Auth.LocalhostBypass = true
+			h := srv.Handler()
+
+			// Protected route via the localhost bypass
+			req := httptest.NewRequest(http.MethodGet, "http://localhost:8080/health", nil)
+			req.RemoteAddr = remote
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+			if w.Code != http.StatusOK {
+				t.Errorf("/health from %s: expected 200, got %d: %s", ip, w.Code, w.Body.String())
+			}
+
+			// Login is not refused as blocked (it fails later, on credentials)
+			req = httptest.NewRequest(http.MethodPost, "/auth/login",
+				strings.NewReader(`{"username":"nobody","password":"wrong"}`))
+			req.RemoteAddr = remote
+			w = httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+			if strings.Contains(w.Body.String(), "ip_blocked") {
+				t.Errorf("login from %s was refused as blocked: %s", ip, w.Body.String())
+			}
+		})
 	}
 }

@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,6 +34,8 @@ type AuthConfig struct {
 	LocalhostBypass bool             `yaml:"localhost_bypass"`
 	Passwords       []PasswordConfig `yaml:"passwords"`
 	JWT             JWTConfig        `yaml:"jwt"`
+	// PwauthPath overrides the pwauth helper location (default /usr/bin/pwauth)
+	PwauthPath string `yaml:"pwauth_path,omitempty"`
 }
 
 type PasswordConfig struct {
@@ -131,6 +134,9 @@ func LoadConfig(path string) (*Config, error) {
 	if cfg.Auth.JWT.SecretFile != "" {
 		cfg.Auth.JWT.SecretFile = ExpandPath(cfg.Auth.JWT.SecretFile)
 	}
+	if cfg.Auth.PwauthPath != "" {
+		cfg.Auth.PwauthPath = ExpandPath(cfg.Auth.PwauthPath)
+	}
 	if cfg.Logging.File != "" {
 		cfg.Logging.File = ExpandPath(cfg.Logging.File)
 	}
@@ -152,8 +158,25 @@ func ExpandPath(path string) string {
 	return path
 }
 
+// validSource reports whether s is an IP address or a CIDR network
+func validSource(s string) bool {
+	if strings.Contains(s, "/") {
+		_, err := netip.ParsePrefix(s)
+		return err == nil
+	}
+	_, err := netip.ParseAddr(s)
+	return err == nil
+}
+
 // Validate checks if the configuration is valid
 func (c *Config) Validate() error {
+	if c.Server.ReadTimeout < 0 {
+		return fmt.Errorf("server.read_timeout must not be negative")
+	}
+	if c.Server.WriteTimeout < 0 {
+		return fmt.Errorf("server.write_timeout must not be negative")
+	}
+
 	if c.Auth.Enabled {
 		if len(c.Auth.Passwords) == 0 {
 			return fmt.Errorf("auth enabled but no passwords configured")
@@ -161,6 +184,36 @@ func (c *Config) Validate() error {
 
 		if c.Auth.JWT.SecretFile == "" {
 			return fmt.Errorf("jwt.secret_file is required when auth is enabled")
+		}
+
+		for _, pw := range c.Auth.Passwords {
+			for _, src := range pw.AllowedSources {
+				if !validSource(src.IP) {
+					return fmt.Errorf("invalid allowed_sources entry %q for password %s: want an IP address or CIDR network", src.IP, pw.Name)
+				}
+			}
+		}
+	}
+
+	// Failed-login settings are optional (defaults: 5 attempts, 15m lockout,
+	// 5m window), but values that are given must be usable
+	fl := c.RateLimiting.FailedLogin
+	if fl.MaxAttempts < 0 {
+		return fmt.Errorf("rate_limiting.failed_login.max_attempts must not be negative")
+	}
+	for name, value := range map[string]string{
+		"lockout_duration": fl.LockoutDuration,
+		"window_duration":  fl.WindowDuration,
+	} {
+		if value == "" {
+			continue
+		}
+		d, err := time.ParseDuration(value)
+		if err != nil {
+			return fmt.Errorf("invalid rate_limiting.failed_login.%s %q: %w", name, value, err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("rate_limiting.failed_login.%s must be positive", name)
 		}
 	}
 

@@ -57,6 +57,9 @@ mkdir -p ~/.local/state/gasp
 # Generate a 48-byte (256-bit) secret
 openssl rand -base64 48 > ~/.config/gasp/jwt-secret
 
+# GASP refuses to start if group or others can read or write the secret
+chmod 600 ~/.config/gasp/jwt-secret
+
 # Verify it was created and is >= 32 bytes
 wc -c ~/.config/gasp/jwt-secret
 # Expected: Should show at least 32 bytes
@@ -68,7 +71,7 @@ Create `~/.config/gasp/config.yaml`:
 
 ```yaml
 server:
-  listen_address: "127.0.0.1:9090"
+  listen_address: "127.0.0.1:8080"
 
 mode: "spoke"
 
@@ -133,11 +136,11 @@ rate_limiting:
    2024/12/22 16:00:00 Registering collectors...
    2024/12/22 16:00:00 Registered CPU and Memory collectors
    2024/12/22 16:00:00 Authentication enabled
-   2024/12/22 16:00:00 Starting GASP server on :8080
+   2024/12/22 16:00:00 Starting GASP server on 127.0.0.1:8080
    2024/12/22 16:00:00 Endpoints:
-   2024/12/22 16:00:00   http://localhost:8080/health  - Health check
-   2024/12/22 16:00:00   http://localhost:8080/metrics - System metrics
-   2024/12/22 16:00:00   http://localhost:8080/version - Version info
+   2024/12/22 16:00:00   http://127.0.0.1:8080/health  - Health check
+   2024/12/22 16:00:00   http://127.0.0.1:8080/metrics - System metrics
+   2024/12/22 16:00:00   http://127.0.0.1:8080/version - Version info
    ```
 
 3. **Verify:**
@@ -639,7 +642,19 @@ rate_limiting:
 **Solution:**
 ```bash
 openssl rand -base64 48 > ~/.config/gasp/jwt-secret
+chmod 600 ~/.config/gasp/jwt-secret
 wc -c ~/.config/gasp/jwt-secret  # Should be >= 32
+```
+
+---
+
+### Problem: "JWT secret file ... has permissions ..."
+
+**Cause:** The secret file is readable or writable by group or others.
+
+**Solution:**
+```bash
+chmod 600 ~/.config/gasp/jwt-secret
 ```
 
 ---

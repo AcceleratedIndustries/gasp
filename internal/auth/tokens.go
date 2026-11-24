@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"crypto/rand"
 	"fmt"
 	"os"
@@ -22,6 +23,16 @@ type GASPClaims struct {
 	jwt.RegisteredClaims
 }
 
+const (
+	// tokenIssuer and tokenAudience are set on every token and required on
+	// validation, so a token signed for another service with the same key
+	// is not accepted here.
+	tokenIssuer   = "gasp"
+	tokenAudience = "gasp"
+
+	minSecretLength = 32
+)
+
 // NewTokenManager creates a new token manager
 func NewTokenManager(secretFile string) *TokenManager {
 	return &TokenManager{
@@ -29,15 +40,28 @@ func NewTokenManager(secretFile string) *TokenManager {
 	}
 }
 
-// LoadSecret loads the JWT secret from file
+// LoadSecret loads the JWT secret from file. The file must not be readable
+// or writable by group or others, and must hold at least 32 bytes besides
+// surrounding whitespace.
 func (tm *TokenManager) LoadSecret() error {
+	info, err := os.Stat(tm.secretFile)
+	if err != nil {
+		return fmt.Errorf("failed to read JWT secret: %w", err)
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		return fmt.Errorf("JWT secret file %s has permissions %#o; run chmod 600 on it", tm.secretFile, perm)
+	}
+
 	data, err := os.ReadFile(tm.secretFile)
 	if err != nil {
 		return fmt.Errorf("failed to read JWT secret: %w", err)
 	}
 
-	if len(data) < 32 {
-		return fmt.Errorf("JWT secret must be at least 32 bytes")
+	// A trailing newline from echo or openssl shouldn't count toward the
+	// minimum. The bytes are still used as written, so existing secret
+	// files keep producing the same signatures.
+	if len(bytes.TrimSpace(data)) < minSecretLength {
+		return fmt.Errorf("JWT secret must be at least %d bytes", minSecretLength)
 	}
 
 	tm.secret = data
@@ -54,6 +78,8 @@ func (tm *TokenManager) GenerateToken(session *Session) (string, error) {
 			IssuedAt:  jwt.NewNumericDate(session.IssuedAt),
 			ExpiresAt: jwt.NewNumericDate(session.ExpiresAt),
 			Subject:   session.Username,
+			Issuer:    tokenIssuer,
+			Audience:  jwt.ClaimStrings{tokenAudience},
 		},
 	}
 
@@ -75,7 +101,12 @@ func (tm *TokenManager) ValidateToken(tokenString string) (*GASPClaims, error) {
 			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 		}
 		return tm.secret, nil
-	})
+	},
+		jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
+		jwt.WithIssuer(tokenIssuer),
+		jwt.WithAudience(tokenAudience),
+		jwt.WithExpirationRequired(),
+	)
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse token: %w", err)

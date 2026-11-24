@@ -13,6 +13,7 @@ type SessionStore struct {
 	sessions map[uint64]*Session
 	mu       sync.RWMutex
 	filePath string
+	saveMu   sync.Mutex // serializes Save so writes can't collide or reorder
 }
 
 // NewSessionStore creates a new session store
@@ -102,8 +103,22 @@ func (s *SessionStore) CleanupExpired() int {
 
 // Save persists sessions to disk
 func (s *SessionStore) Save() error {
+	// Hold saveMu across snapshot and write, so concurrent saves can't
+	// collide and a later save always carries the newer state
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+
+	// Convert map to slice for JSON
 	s.mu.RLock()
-	defer s.mu.RUnlock()
+	sessions := make([]*Session, 0, len(s.sessions))
+	for _, session := range s.sessions {
+		sessions = append(sessions, session)
+	}
+	data, err := json.MarshalIndent(sessions, "", "  ")
+	s.mu.RUnlock()
+	if err != nil {
+		return fmt.Errorf("failed to marshal sessions: %w", err)
+	}
 
 	// Create directory if it doesn't exist
 	dir := filepath.Dir(s.filePath)
@@ -111,21 +126,24 @@ func (s *SessionStore) Save() error {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	// Convert map to slice for JSON
-	sessions := make([]*Session, 0, len(s.sessions))
-	for _, session := range s.sessions {
-		sessions = append(sessions, session)
-	}
-
-	// Write to temp file then rename (atomic)
-	tempFile := s.filePath + ".tmp"
-	data, err := json.MarshalIndent(sessions, "", "  ")
+	// Write to a unique temp file then rename (atomic)
+	tmp, err := os.CreateTemp(dir, filepath.Base(s.filePath)+".*.tmp")
 	if err != nil {
-		return fmt.Errorf("failed to marshal sessions: %w", err)
+		return fmt.Errorf("failed to create temp sessions file: %w", err)
 	}
+	tempFile := tmp.Name()
+	defer os.Remove(tempFile) // no-op once the rename succeeds
 
-	if err := os.WriteFile(tempFile, data, 0600); err != nil {
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
 		return fmt.Errorf("failed to write sessions: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("failed to sync sessions: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("failed to close sessions file: %w", err)
 	}
 
 	if err := os.Rename(tempFile, s.filePath); err != nil {

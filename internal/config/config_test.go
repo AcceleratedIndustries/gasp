@@ -268,3 +268,97 @@ func TestExpandPath(t *testing.T) {
 		})
 	}
 }
+
+func TestValidate_RateLimiting(t *testing.T) {
+	tests := []struct {
+		name      string
+		policy    FailedLoginConfig
+		expectErr bool
+	}{
+		{"missing section uses defaults", FailedLoginConfig{}, false},
+		{"valid values", FailedLoginConfig{MaxAttempts: 5, LockoutDuration: "15m", WindowDuration: "5m"}, false},
+		{"negative max attempts", FailedLoginConfig{MaxAttempts: -1}, true},
+		{"bad lockout duration", FailedLoginConfig{LockoutDuration: "15 minutes"}, true},
+		{"bad window duration", FailedLoginConfig{WindowDuration: "soon"}, true},
+		{"zero lockout duration", FailedLoginConfig{LockoutDuration: "0s"}, true},
+		{"negative window duration", FailedLoginConfig{WindowDuration: "-5m"}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{RateLimiting: RateLimitingConfig{FailedLogin: tt.policy}}
+			err := cfg.Validate()
+			if (err != nil) != tt.expectErr {
+				t.Errorf("Validate() error = %v, expectErr %v", err, tt.expectErr)
+			}
+		})
+	}
+}
+
+func TestValidate_AllowedSources(t *testing.T) {
+	tests := []struct {
+		source    string
+		expectErr bool
+	}{
+		{"127.0.0.1", false},
+		{"192.168.1.0/24", false},
+		{"2001:db8::/32", false},
+		{"::1", false},
+		{"192.168.1.0/33", true},
+		{"192.168.1.*", true},
+		{"localhost", true},
+		{"", true},
+	}
+
+	for _, tt := range tests {
+		cfg := Config{
+			Auth: AuthConfig{
+				Enabled: true,
+				Passwords: []PasswordConfig{
+					{Name: "default", AllowedSources: []AllowedIP{{IP: tt.source}}},
+				},
+				JWT: JWTConfig{SecretFile: "/tmp/jwt-secret"},
+			},
+		}
+		err := cfg.Validate()
+		if (err != nil) != tt.expectErr {
+			t.Errorf("allowed_sources %q: Validate() error = %v, expectErr %v", tt.source, err, tt.expectErr)
+		}
+	}
+}
+
+func TestValidate_ServerTimeouts(t *testing.T) {
+	tests := []struct {
+		name      string
+		server    ServerConfig
+		expectErr bool
+	}{
+		{"unset uses defaults", ServerConfig{}, false},
+		{"positive values", ServerConfig{ReadTimeout: 30 * time.Second, WriteTimeout: time.Minute}, false},
+		{"negative read timeout", ServerConfig{ReadTimeout: -time.Second}, true},
+		{"negative write timeout", ServerConfig{WriteTimeout: -time.Second}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{Server: tt.server}
+			if err := cfg.Validate(); (err != nil) != tt.expectErr {
+				t.Errorf("Validate() error = %v, expectErr %v", err, tt.expectErr)
+			}
+		})
+	}
+}
+
+func TestLoadConfig_ServerTimeouts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	data := "server:\n  listen_address: \"127.0.0.1:8080\"\n  read_timeout: 15s\n  write_timeout: 45s\n"
+	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Server.ReadTimeout != 15*time.Second || cfg.Server.WriteTimeout != 45*time.Second {
+		t.Errorf("Expected 15s and 45s, got %v and %v", cfg.Server.ReadTimeout, cfg.Server.WriteTimeout)
+	}
+}

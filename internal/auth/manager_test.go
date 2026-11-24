@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -122,7 +123,7 @@ func TestAuthManager_IPBindingViolation(t *testing.T) {
 		t.Fatalf("Failed to create auth manager: %v", err)
 	}
 
-	t.Cleanup(manager.waitForBackgroundSaves)
+	t.Cleanup(manager.Flush)
 
 	// Create session for one IP
 	session := NewSession("testuser", "192.168.1.100", "gasp-cli", 24*time.Hour)
@@ -220,7 +221,7 @@ func TestAuthManager_SecurityStatePersistence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create auth manager: %v", err)
 	}
-	t.Cleanup(manager1.waitForBackgroundSaves)
+	t.Cleanup(manager1.Flush)
 
 	// Block an IP
 	manager1.BlockIP("192.168.1.200", "test_block", "testuser", 12345)
@@ -283,7 +284,7 @@ func TestAuthManager_ConcurrentSecurityStateSaves(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create auth manager: %v", err)
 	}
-	t.Cleanup(manager.waitForBackgroundSaves)
+	t.Cleanup(manager.Flush)
 
 	// Every BlockIP and every locking RecordFailedLogin starts a background
 	// save, and direct saves run alongside them. None may fail.
@@ -313,7 +314,7 @@ func TestAuthManager_ConcurrentSecurityStateSaves(t *testing.T) {
 		}
 	}
 
-	manager.waitForBackgroundSaves()
+	manager.Flush()
 
 	// The file on disk must hold the final state.
 	reloaded, err := NewAuthManager(cfg, sessionsFile, securityFile)
@@ -382,7 +383,7 @@ func TestAuthManager_LoginRejectsControlCharacters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create auth manager: %v", err)
 	}
-	t.Cleanup(manager.waitForBackgroundSaves)
+	t.Cleanup(manager.Flush)
 
 	stdinFile := filepath.Join(tmpDir, "pwauth-stdin")
 	manager.pamAuth.pwauthPath = writeFakePwauth(t, tmpDir, stdinFile)
@@ -435,4 +436,290 @@ func TestAuthManager_LoginRejectsControlCharacters(t *testing.T) {
 	if !counted {
 		t.Error("Failed login should be counted against user root")
 	}
+}
+
+// newTestManager creates an AuthManager in a temp dir with a JWT secret and
+// the given failed-login policy. Background saves are waited for at cleanup.
+func newTestManager(t *testing.T, failedLogin config.FailedLoginConfig) (*AuthManager, *config.Config, string) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	secretFile := filepath.Join(tmpDir, "jwt-secret")
+	secret := []byte("test-secret-key-at-least-32-chars-long-12345")
+	if err := os.WriteFile(secretFile, secret, 0600); err != nil {
+		t.Fatalf("Failed to write secret: %v", err)
+	}
+
+	cfg := &config.Config{
+		Auth: config.AuthConfig{
+			Enabled: true,
+			JWT: config.JWTConfig{
+				SecretFile: secretFile,
+			},
+		},
+		RateLimiting: config.RateLimitingConfig{FailedLogin: failedLogin},
+	}
+
+	manager, err := NewAuthManager(cfg, filepath.Join(tmpDir, "sessions.json"), filepath.Join(tmpDir, "security.json"))
+	if err != nil {
+		t.Fatalf("Failed to create auth manager: %v", err)
+	}
+	t.Cleanup(manager.Flush)
+	return manager, cfg, tmpDir
+}
+
+func TestAuthManager_ClearUserLockout(t *testing.T) {
+	manager, cfg, tmpDir := newTestManager(t, config.FailedLoginConfig{
+		MaxAttempts:     2,
+		LockoutDuration: "15m",
+	})
+
+	manager.RecordFailedLogin("alice", "192.168.1.100")
+	manager.RecordFailedLogin("alice", "192.168.1.100")
+	if locked, _ := manager.CheckUserLockout("alice"); !locked {
+		t.Fatal("Expected alice to be locked out")
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- manager.ClearUserLockout("alice") }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("ClearUserLockout failed: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ClearUserLockout did not return: deadlock")
+	}
+
+	if locked, _ := manager.CheckUserLockout("alice"); locked {
+		t.Error("Expected alice to be unlocked")
+	}
+
+	// Other auth calls must still work afterwards.
+	if manager.IsIPBlocked("192.168.1.100") {
+		t.Error("Unexpected block")
+	}
+
+	// The cleared state must be on disk.
+	manager.Flush()
+	reloaded, err := NewAuthManager(cfg, filepath.Join(tmpDir, "sessions.json"), filepath.Join(tmpDir, "security.json"))
+	if err != nil {
+		t.Fatalf("Failed to reload auth manager: %v", err)
+	}
+	if locked, _ := reloaded.CheckUserLockout("alice"); locked {
+		t.Error("Cleared lockout should stay cleared after restart")
+	}
+
+	if err := manager.ClearUserLockout("nobody"); err == nil {
+		t.Error("Expected error for user with no lockout")
+	}
+}
+
+func TestAuthManager_FailedLoginPolicyDefaults(t *testing.T) {
+	tests := []struct {
+		name        string
+		policy      config.FailedLoginConfig
+		wantAttempt int
+		wantLockout time.Duration
+	}{
+		{"missing rate_limiting section", config.FailedLoginConfig{}, 5, 15 * time.Minute},
+		{"invalid lockout duration", config.FailedLoginConfig{MaxAttempts: 2, LockoutDuration: "banana"}, 2, 15 * time.Minute},
+		{"zero lockout duration", config.FailedLoginConfig{MaxAttempts: 2, LockoutDuration: "0s"}, 2, 15 * time.Minute},
+		{"configured values", config.FailedLoginConfig{MaxAttempts: 3, LockoutDuration: "1h"}, 3, time.Hour},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manager, _, _ := newTestManager(t, tt.policy)
+
+			for i := 1; i < tt.wantAttempt; i++ {
+				if locked, _ := manager.RecordFailedLogin("alice", "192.168.1.100"); locked {
+					t.Fatalf("Locked after %d attempts, want lock at %d", i, tt.wantAttempt)
+				}
+				if locked, _ := manager.CheckUserLockout("alice"); locked {
+					t.Fatalf("CheckUserLockout reports locked after %d attempts", i)
+				}
+			}
+
+			before := time.Now()
+			locked, until := manager.RecordFailedLogin("alice", "192.168.1.100")
+			if !locked {
+				t.Fatalf("Expected lock at attempt %d", tt.wantAttempt)
+			}
+			if d := until.Sub(before); d < tt.wantLockout-time.Second || d > tt.wantLockout+time.Second {
+				t.Errorf("Lockout lasts %v, want about %v", d, tt.wantLockout)
+			}
+			if locked, _ := manager.CheckUserLockout("alice"); !locked {
+				t.Error("A reported lockout must actually lock the user")
+			}
+		})
+	}
+}
+
+func TestAuthManager_RevokedSessionStaysRevokedAfterRestart(t *testing.T) {
+	manager, cfg, tmpDir := newTestManager(t, config.FailedLoginConfig{})
+
+	session := NewSession("testuser", "192.168.1.100", "gasp-cli", 24*time.Hour)
+	manager.sessions.Create(session)
+	if err := manager.sessions.Save(); err != nil {
+		t.Fatalf("Failed to save sessions: %v", err)
+	}
+	token, err := manager.tokenManager.GenerateToken(session)
+	if err != nil {
+		t.Fatalf("Failed to generate token: %v", err)
+	}
+
+	// IP binding violation revokes the session.
+	if _, err := manager.ValidateToken(token, "192.168.1.200"); err == nil {
+		t.Fatal("Expected IP binding violation")
+	}
+	manager.Flush()
+
+	// After a restart the session must still be gone.
+	reloaded, err := NewAuthManager(cfg, filepath.Join(tmpDir, "sessions.json"), filepath.Join(tmpDir, "security.json"))
+	if err != nil {
+		t.Fatalf("Failed to reload auth manager: %v", err)
+	}
+	if _, err := reloaded.ValidateToken(token, "192.168.1.100"); err == nil || !strings.Contains(err.Error(), "session not found") {
+		t.Errorf("Revoked token should stay revoked after restart, got err = %v", err)
+	}
+	if !reloaded.IsIPBlocked("192.168.1.200") {
+		t.Error("Offending IP should stay blocked after restart")
+	}
+}
+
+func TestAuthManager_LoginPwauthUnavailable(t *testing.T) {
+	if _, err := exec.LookPath("/bin/sh"); err != nil {
+		t.Skip("/bin/sh not available for fake pwauth")
+	}
+
+	t.Run("missing pwauth", func(t *testing.T) {
+		manager, _, tmpDir := newTestManager(t, config.FailedLoginConfig{MaxAttempts: 2})
+		manager.pamAuth.pwauthPath = filepath.Join(tmpDir, "no-such-pwauth")
+
+		for i := 0; i < 5; i++ {
+			_, _, err := manager.Login("alice", "secret", "192.168.1.100", "gasp-cli", time.Hour)
+			if !errors.Is(err, ErrPwauthNotFound) {
+				t.Fatalf("Attempt %d: expected ErrPwauthNotFound, got %v", i+1, err)
+			}
+		}
+		if locked, _ := manager.CheckUserLockout("alice"); locked {
+			t.Error("A missing pwauth must not lock the user out")
+		}
+	})
+
+	t.Run("hung pwauth", func(t *testing.T) {
+		manager, _, tmpDir := newTestManager(t, config.FailedLoginConfig{MaxAttempts: 1})
+		script := filepath.Join(tmpDir, "slow-pwauth")
+		if err := os.WriteFile(script, []byte("#!/bin/sh\nsleep 30\n"), 0700); err != nil {
+			t.Fatalf("Failed to write script: %v", err)
+		}
+		manager.pamAuth.pwauthPath = script
+		manager.pamAuth.timeout = 200 * time.Millisecond
+
+		start := time.Now()
+		_, _, err := manager.Login("alice", "secret", "192.168.1.100", "gasp-cli", time.Hour)
+		if !errors.Is(err, ErrPwauthTimeout) {
+			t.Fatalf("Expected ErrPwauthTimeout, got %v", err)
+		}
+		if elapsed := time.Since(start); elapsed > 5*time.Second {
+			t.Errorf("Login took %v; the timeout did not stop pwauth", elapsed)
+		}
+		if locked, _ := manager.CheckUserLockout("alice"); locked {
+			t.Error("A hung pwauth must not lock the user out")
+		}
+	})
+}
+
+func TestAuthManager_IsSourceAllowed(t *testing.T) {
+	manager, cfg, _ := newTestManager(t, config.FailedLoginConfig{})
+
+	if !manager.IsSourceAllowed("203.0.113.9") {
+		t.Error("With no allowed_sources, every source should be allowed")
+	}
+
+	cfg.Auth.Passwords = []config.PasswordConfig{
+		{Name: "default", AllowedSources: []config.AllowedIP{
+			{IP: "127.0.0.1"},
+			{IP: "192.168.1.0/24"},
+		}},
+		{Name: "v6", AllowedSources: []config.AllowedIP{
+			{IP: "2001:db8::/32"},
+		}},
+	}
+
+	tests := map[string]bool{
+		"127.0.0.1":     true,
+		"192.168.1.77":  true,
+		"2001:db8::5":   true,
+		"192.168.2.1":   false,
+		"::1":           false,
+		"203.0.113.9":   false,
+		"not-an-ip":     false,
+		"[2001:db8::5]": false,
+	}
+	for ip, want := range tests {
+		if got := manager.IsSourceAllowed(ip); got != want {
+			t.Errorf("IsSourceAllowed(%q) = %v, want %v", ip, got, want)
+		}
+	}
+}
+
+func TestAuthManager_LockoutMapStaysBounded(t *testing.T) {
+	t.Run("stale entries are pruned", func(t *testing.T) {
+		manager, _, _ := newTestManager(t, config.FailedLoginConfig{
+			MaxAttempts:    100,
+			WindowDuration: "50ms",
+		})
+
+		for i := 0; i < 3000; i++ {
+			manager.RecordFailedLogin(fmt.Sprintf("junk%d", i), "203.0.113.9")
+		}
+		time.Sleep(100 * time.Millisecond)
+		manager.RecordFailedLogin("one-more", "203.0.113.9")
+
+		manager.mu.RLock()
+		n := len(manager.userLockouts)
+		manager.mu.RUnlock()
+		if n > lockoutPruneThreshold {
+			t.Errorf("Expected stale entries to be pruned, still tracking %d usernames", n)
+		}
+	})
+
+	t.Run("locked and recent entries are kept", func(t *testing.T) {
+		manager, _, _ := newTestManager(t, config.FailedLoginConfig{
+			MaxAttempts:    5,
+			WindowDuration: "5m",
+		})
+
+		old := time.Now().Add(-time.Hour)
+		manager.mu.Lock()
+		for i := 0; i < lockoutPruneThreshold; i++ {
+			name := fmt.Sprintf("stale%d", i)
+			manager.userLockouts[name] = &UserLockout{Username: name, AttemptTimes: []time.Time{old}}
+		}
+		manager.userLockouts["locked"] = &UserLockout{
+			Username: "locked", AttemptTimes: []time.Time{old}, LockedUntil: time.Now().Add(time.Hour),
+		}
+		manager.userLockouts["recent"] = &UserLockout{
+			Username: "recent", AttemptTimes: []time.Time{time.Now()}, FailedAttempts: 1,
+		}
+		manager.mu.Unlock()
+
+		manager.RecordFailedLogin("one-more", "203.0.113.9")
+
+		manager.mu.RLock()
+		defer manager.mu.RUnlock()
+		for _, name := range []string{"locked", "recent", "one-more"} {
+			if _, ok := manager.userLockouts[name]; !ok {
+				t.Errorf("%s should be kept", name)
+			}
+		}
+		if _, ok := manager.userLockouts["stale0"]; ok {
+			t.Error("stale entries should be pruned")
+		}
+		if n := len(manager.userLockouts); n != 3 {
+			t.Errorf("Expected 3 entries after pruning, got %d", n)
+		}
+	})
 }

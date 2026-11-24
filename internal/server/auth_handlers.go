@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -9,6 +10,11 @@ import (
 
 	"github.com/accelerated-industries/gasp/internal/auth"
 )
+
+// maxLoginBodyBytes caps the login request body. A username and password
+// fit in far less; the cap stops a client from making the server read an
+// arbitrarily large body.
+const maxLoginBodyBytes = 64 << 10
 
 // LoginRequest represents a login request body
 type LoginRequest struct {
@@ -37,15 +43,43 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Without auth there is nothing to log in to, and without an auth
+	// manager the login below would dereference nil
+	if s.config == nil || !s.config.Auth.Enabled {
+		writeErrorResponse(w, http.StatusNotFound, "authentication_disabled",
+			"Authentication is disabled on this server. No login is needed.",
+			"no_auth_required", nil)
+		return
+	}
+	if s.authManager == nil {
+		writeErrorResponse(w, http.StatusServiceUnavailable,
+			"authentication_service_unavailable",
+			"Authentication service is not available.",
+			"retry_later",
+			nil)
+		return
+	}
+
 	// Extract client IP the same way RequireAuth does, so the IP bound to
 	// the session matches the IP seen on later requests (IPv6 included)
 	clientIP := extractClientIP(r.RemoteAddr)
 
-	// Check if IP is blocked
-	if s.authManager != nil && s.authManager.IsIPBlocked(clientIP) {
+	// Check if IP is blocked (direct requests from localhost are exempt)
+	if s.isBlocked(r, clientIP) {
 		writeForbidden(w, "ip_blocked", "Access denied. Your IP address has been blocked.",
 			"contact_admin", map[string]interface{}{
 				"ip": clientIP,
+			})
+		return
+	}
+
+	// Only sources listed in allowed_sources may log in (any, if none are
+	// listed). The spec also blocks such IPs permanently; that is left out
+	// on purpose, since a typo in the list would lock out a real client.
+	if !s.authManager.IsSourceAllowed(clientIP) {
+		writeForbidden(w, "unauthorized_source_ip", "Access denied. Your IP address is not authorized.",
+			"contact_admin", map[string]interface{}{
+				"source_ip": clientIP,
 			})
 		return
 	}
@@ -60,7 +94,14 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	} else {
 		// Try JSON body
 		var loginReq LoginRequest
+		r.Body = http.MaxBytesReader(w, r.Body, maxLoginBodyBytes)
 		if err := json.NewDecoder(r.Body).Decode(&loginReq); err != nil {
+			var tooLarge *http.MaxBytesError
+			if errors.As(err, &tooLarge) {
+				writeErrorResponse(w, http.StatusRequestEntityTooLarge, "request_too_large",
+					"Request body is too large.", "fix_request", nil)
+				return
+			}
 			writeBadRequest(w, "malformed_request",
 				"Request body is malformed or missing required fields.", "fix_request")
 			return
@@ -90,7 +131,15 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// Authenticate and create session
 	session, token, err := s.authManager.Login(username, password, clientIP, "gasp-cli", ttl)
 	if err != nil {
-		if strings.Contains(err.Error(), "locked out") {
+		if errors.Is(err, auth.ErrPwauthNotFound) {
+			writeErrorResponse(w, http.StatusServiceUnavailable, "pwauth_not_found",
+				"PAM authentication service not available. pwauth binary not found.",
+				"install_pwauth", nil)
+		} else if errors.Is(err, auth.ErrPwauthTimeout) {
+			writeErrorResponse(w, http.StatusServiceUnavailable, "authentication_timeout",
+				"Authentication service did not respond in time.",
+				"retry_later", nil)
+		} else if strings.Contains(err.Error(), "locked out") {
 			writeUnauthorized(w, "user_locked_out", err.Error(), "wait_or_contact_admin")
 		} else {
 			writeUnauthorized(w, "invalid_credentials", "Authentication failed. Invalid username or password.", "verify_credentials")

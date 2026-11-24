@@ -3,6 +3,7 @@ package auth
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -53,6 +54,10 @@ func NewAuthManager(cfg *config.Config, sessionsFile, securityFile string) (*Aut
 		securityFile: securityFile,
 	}
 
+	if cfg.Auth.PwauthPath != "" {
+		manager.pamAuth.pwauthPath = cfg.Auth.PwauthPath
+	}
+
 	// Load security state
 	if err := manager.loadSecurityState(); err != nil {
 		fmt.Printf("Warning: failed to load security state: %v\n", err)
@@ -78,6 +83,7 @@ func (am *AuthManager) ValidateToken(tokenString, clientIP string) (*Session, er
 	// Check expiration
 	if session.IsExpired() {
 		am.sessions.Delete(session.TokenID)
+		am.saveSessions()
 		return nil, fmt.Errorf("session expired")
 	}
 
@@ -85,6 +91,7 @@ func (am *AuthManager) ValidateToken(tokenString, clientIP string) (*Session, er
 	if subtle.ConstantTimeCompare([]byte(session.ClientIP), []byte(clientIP)) != 1 {
 		// IP binding violation - revoke token and block IP
 		am.sessions.Delete(session.TokenID)
+		am.saveSessions()
 		am.BlockIP(clientIP, "ip_binding_violation", session.Username, session.TokenID)
 		return nil, fmt.Errorf("IP binding violation")
 	}
@@ -107,6 +114,12 @@ func (am *AuthManager) Login(username, password, clientIP, clientID string, ttl 
 
 	// Authenticate via PAM
 	if err := am.pamAuth.Authenticate(username, password); err != nil {
+		// pwauth missing or hung: the password was never checked, so this
+		// is not a failed attempt
+		if errors.Is(err, ErrPwauthNotFound) || errors.Is(err, ErrPwauthTimeout) {
+			return nil, "", err
+		}
+
 		// Record failed attempt
 		shouldLock, lockedUntil := am.RecordFailedLogin(username, clientIP)
 		if shouldLock {
@@ -132,6 +145,30 @@ func (am *AuthManager) Login(username, password, clientIP, clientID string, ttl 
 	}
 
 	return session, token, nil
+}
+
+// saveSessions persists the session store, so a revoked session stays
+// revoked after a restart. Failures are logged, not returned.
+func (am *AuthManager) saveSessions() {
+	if err := am.sessions.Save(); err != nil {
+		fmt.Printf("Warning: failed to save sessions: %v\n", err)
+	}
+}
+
+// IsSourceAllowed reports whether ip may log in and use tokens, per the
+// allowed_sources of all configured password entries. With no
+// allowed_sources configured anywhere, every source is allowed.
+func (am *AuthManager) IsSourceAllowed(ip string) bool {
+	configured := false
+	for _, pw := range am.config.Auth.Passwords {
+		for _, src := range pw.AllowedSources {
+			configured = true
+			if ok, err := IsIPInCIDR(ip, src.IP); err == nil && ok {
+				return true
+			}
+		}
+	}
+	return !configured
 }
 
 // IsIPBlocked checks if an IP is blocked
@@ -204,8 +241,9 @@ func (am *AuthManager) saveSecurityStateAsync() {
 	}()
 }
 
-// waitForBackgroundSaves blocks until all background saves have finished.
-func (am *AuthManager) waitForBackgroundSaves() {
+// Flush blocks until all background saves of the security state have
+// finished. Call it before shutdown, or in tests before removing state files.
+func (am *AuthManager) Flush() {
 	am.saveWG.Wait()
 }
 
@@ -303,9 +341,16 @@ func (am *AuthManager) RecordFailedLogin(username, clientIP string) (shouldLock 
 	am.mu.Lock()
 	defer am.mu.Unlock()
 
+	maxAttempts, lockoutDuration, windowDuration := am.failedLoginPolicy()
+
 	// Get or create lockout entry
 	lockout, exists := am.userLockouts[username]
 	if !exists {
+		// Every distinct username tried gets an entry, so drop stale ones
+		// before the map (and the saved file) can grow without bound
+		if len(am.userLockouts) >= lockoutPruneThreshold {
+			am.pruneStaleLockoutsLocked(windowDuration)
+		}
 		lockout = &UserLockout{
 			Username:     username,
 			AttemptTimes: []time.Time{},
@@ -313,22 +358,13 @@ func (am *AuthManager) RecordFailedLogin(username, clientIP string) (shouldLock 
 		am.userLockouts[username] = lockout
 	}
 
-	// Cleanup old attempts (5 minute window by default)
-	windowDuration := 5 * time.Minute
-	if am.config.RateLimiting.FailedLogin.WindowDuration != "" {
-		if d, err := time.ParseDuration(am.config.RateLimiting.FailedLogin.WindowDuration); err == nil {
-			windowDuration = d
-		}
-	}
 	cleanupOldAttempts(lockout, windowDuration)
 
 	// Record attempt
 	recordFailedAttempt(lockout, clientIP)
 
 	// Check if should lock
-	maxAttempts := am.config.RateLimiting.FailedLogin.MaxAttempts
 	if shouldLockUser(lockout, maxAttempts) {
-		lockoutDuration, _ := time.ParseDuration(am.config.RateLimiting.FailedLogin.LockoutDuration)
 		lockUser(lockout, lockoutDuration)
 
 		// Save security state
@@ -340,16 +376,77 @@ func (am *AuthManager) RecordFailedLogin(username, clientIP string) (shouldLock 
 	return false, time.Time{}
 }
 
+// lockoutPruneThreshold is the number of tracked usernames above which
+// stale entries are pruned when a new username fails to log in
+const lockoutPruneThreshold = 1024
+
+// pruneStaleLockoutsLocked removes entries that are not locked and have no
+// failed attempts inside the window, since they can't affect any future
+// lockout decision. The caller must hold am.mu for writing.
+func (am *AuthManager) pruneStaleLockoutsLocked(window time.Duration) {
+	cutoff := time.Now().Add(-window)
+	for name, lockout := range am.userLockouts {
+		if lockout.IsLocked() {
+			continue
+		}
+		recent := false
+		for _, t := range lockout.AttemptTimes {
+			if t.After(cutoff) {
+				recent = true
+				break
+			}
+		}
+		if !recent {
+			delete(am.userLockouts, name)
+		}
+	}
+}
+
+// Default failed-login policy, used for any rate_limiting.failed_login
+// setting that is missing or invalid
+const (
+	defaultMaxFailedAttempts = 5
+	defaultLockoutDuration   = 15 * time.Minute
+	defaultAttemptWindow     = 5 * time.Minute
+)
+
+// failedLoginPolicy returns the configured failed-login policy, falling
+// back to the defaults for missing or invalid values. Without this, a
+// config with no rate_limiting section gave max_attempts 0 and a zero
+// lockout: every failure reported "locked out" but nothing was locked.
+func (am *AuthManager) failedLoginPolicy() (maxAttempts int, lockout, window time.Duration) {
+	fl := am.config.RateLimiting.FailedLogin
+
+	maxAttempts = fl.MaxAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = defaultMaxFailedAttempts
+	}
+
+	lockout = defaultLockoutDuration
+	if d, err := time.ParseDuration(fl.LockoutDuration); err == nil && d > 0 {
+		lockout = d
+	}
+
+	window = defaultAttemptWindow
+	if d, err := time.ParseDuration(fl.WindowDuration); err == nil && d > 0 {
+		window = d
+	}
+
+	return maxAttempts, lockout, window
+}
+
 // ClearUserLockout manually clears a user's lockout
 func (am *AuthManager) ClearUserLockout(username string) error {
 	am.mu.Lock()
-	defer am.mu.Unlock()
-
 	lockout, exists := am.userLockouts[username]
 	if !exists {
+		am.mu.Unlock()
 		return fmt.Errorf("no lockout found for user %s", username)
 	}
-
 	clearLockout(lockout)
+	am.mu.Unlock()
+
+	// saveSecurityState takes am.mu itself, so it must run after the
+	// unlock above; sync.RWMutex is not reentrant.
 	return am.saveSecurityState()
 }

@@ -1,7 +1,9 @@
 package server
 
 import (
+	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 )
 
@@ -17,10 +19,35 @@ func (s *Server) RequireAuth(next http.Handler) http.Handler {
 		// Extract client IP from RemoteAddr
 		clientIP := extractClientIP(r.RemoteAddr)
 
-		// Check localhost bypass
-		if s.config.Auth.LocalhostBypass && isLocalhost(clientIP) {
+		// Blocked IPs are denied on every protected route, with or without
+		// a token. Direct requests from this machine are exempt.
+		if s.isBlocked(r, clientIP) {
+			writeForbidden(w, "ip_blocked", "Access denied. Your IP address has been blocked.",
+				"contact_admin", map[string]interface{}{
+					"ip": clientIP,
+				})
+			return
+		}
+
+		// Check localhost bypass. The Host and Origin checks keep a web page
+		// open in a browser on this machine from using the bypass, either
+		// cross-origin or through DNS rebinding (where Host is the
+		// attacker's domain). Such requests fall through and need a token.
+		if s.config.Auth.LocalhostBypass && isLocalhost(clientIP) &&
+			isLoopbackHost(r.Host) && r.Header.Get("Origin") == "" &&
+			!hasProxyHeaders(r) {
 			// Allow localhost requests without authentication
 			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Sources outside allowed_sources can't use tokens either, so
+		// tightening the list takes effect without waiting for tokens to expire
+		if s.authManager != nil && !s.authManager.IsSourceAllowed(clientIP) {
+			writeForbidden(w, "unauthorized_source_ip", "Access denied. Your IP address is not authorized.",
+				"contact_admin", map[string]interface{}{
+					"source_ip": clientIP,
+				})
 			return
 		}
 
@@ -96,6 +123,48 @@ func extractClientIP(remoteAddr string) string {
 	}
 
 	return remoteAddr
+}
+
+// isBlocked reports whether a request comes from a blocked IP. Direct
+// requests from localhost are never treated as blocked, so an admin on the
+// GASP host can't be locked out of it. A request with reverse-proxy headers
+// gets no exemption, since behind a proxy on this host every client arrives
+// from 127.0.0.1.
+func (s *Server) isBlocked(r *http.Request, clientIP string) bool {
+	if s.authManager == nil {
+		return false
+	}
+	if isLocalhost(clientIP) && !hasProxyHeaders(r) {
+		return false
+	}
+	return s.authManager.IsIPBlocked(clientIP)
+}
+
+// hasProxyHeaders reports whether a request carries headers a reverse
+// proxy adds. Behind a proxy on the same host every request arrives from
+// 127.0.0.1, so such requests must not get the localhost bypass. The
+// header values are never trusted as the client address.
+func hasProxyHeaders(r *http.Request) bool {
+	for _, h := range []string{"Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Real-Ip"} {
+		if r.Header.Get(h) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// isLoopbackHost reports whether a Host header names this machine by a
+// loopback name or address, with or without a port
+func isLoopbackHost(host string) bool {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.TrimSuffix(strings.ToLower(strings.Trim(host, "[]")), ".")
+	if host == "localhost" {
+		return true
+	}
+	addr, err := netip.ParseAddr(host)
+	return err == nil && addr.IsLoopback()
 }
 
 // isLocalhost checks if an IP address is localhost
