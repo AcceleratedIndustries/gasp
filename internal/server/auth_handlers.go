@@ -68,6 +68,17 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Only sources listed in allowed_sources may log in (any, if none are
+	// listed). The spec also blocks such IPs permanently; that is left out
+	// on purpose, since a typo in the list would lock out a real client.
+	if !s.authManager.IsSourceAllowed(clientIP) {
+		writeForbidden(w, "unauthorized_source_ip", "Access denied. Your IP address is not authorized.",
+			"contact_admin", map[string]interface{}{
+				"source_ip": clientIP,
+			})
+		return
+	}
+
 	// Parse credentials (support both Basic Auth and JSON body)
 	var username, password string
 

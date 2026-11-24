@@ -294,3 +294,35 @@ func TestValidate_RateLimiting(t *testing.T) {
 		})
 	}
 }
+
+func TestValidate_AllowedSources(t *testing.T) {
+	tests := []struct {
+		source    string
+		expectErr bool
+	}{
+		{"127.0.0.1", false},
+		{"192.168.1.0/24", false},
+		{"2001:db8::/32", false},
+		{"::1", false},
+		{"192.168.1.0/33", true},
+		{"192.168.1.*", true},
+		{"localhost", true},
+		{"", true},
+	}
+
+	for _, tt := range tests {
+		cfg := Config{
+			Auth: AuthConfig{
+				Enabled: true,
+				Passwords: []PasswordConfig{
+					{Name: "default", AllowedSources: []AllowedIP{{IP: tt.source}}},
+				},
+				JWT: JWTConfig{SecretFile: "/tmp/jwt-secret"},
+			},
+		}
+		err := cfg.Validate()
+		if (err != nil) != tt.expectErr {
+			t.Errorf("allowed_sources %q: Validate() error = %v, expectErr %v", tt.source, err, tt.expectErr)
+		}
+	}
+}

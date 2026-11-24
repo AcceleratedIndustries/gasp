@@ -155,6 +155,22 @@ func (am *AuthManager) saveSessions() {
 	}
 }
 
+// IsSourceAllowed reports whether ip may log in and use tokens, per the
+// allowed_sources of all configured password entries. With no
+// allowed_sources configured anywhere, every source is allowed.
+func (am *AuthManager) IsSourceAllowed(ip string) bool {
+	configured := false
+	for _, pw := range am.config.Auth.Passwords {
+		for _, src := range pw.AllowedSources {
+			configured = true
+			if ok, err := IsIPInCIDR(ip, src.IP); err == nil && ok {
+				return true
+			}
+		}
+	}
+	return !configured
+}
+
 // IsIPBlocked checks if an IP is blocked
 func (am *AuthManager) IsIPBlocked(ip string) bool {
 	am.mu.RLock()

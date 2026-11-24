@@ -281,3 +281,36 @@ func TestLoginFlow_PwauthNotFound(t *testing.T) {
 		}
 	}
 }
+
+func TestLoginFlow_AllowedSources(t *testing.T) {
+	srv, h := newE2EServer(t)
+	srv.config.Auth.Passwords[0].AllowedSources = []config.AllowedIP{
+		{IP: "192.168.1.0/24", Name: "home"},
+		{IP: "2001:db8::/32", Name: "home v6"},
+	}
+
+	// Outside the list: refused before the password is checked, not blocked.
+	res := login(t, h, "203.0.113.9:40000", "alice", "correct")
+	if res.code != http.StatusForbidden || res.body["error"] != "unauthorized_source_ip" {
+		t.Fatalf("Outside source: expected 403 unauthorized_source_ip, got %d %v", res.code, res.body["error"])
+	}
+	if srv.authManager.IsIPBlocked("203.0.113.9") {
+		t.Error("A source outside the list should be refused, not permanently blocked")
+	}
+
+	// Inside the list, IPv4 and IPv6.
+	for _, addr := range []string{"192.168.1.50:40000", "[2001:db8::50]:40000"} {
+		if res := login(t, h, addr, "alice", "correct"); res.code != http.StatusOK {
+			t.Fatalf("%s: expected 200, got %d %v", addr, res.code, res.body)
+		}
+	}
+
+	// Tightening the list cuts off existing tokens too.
+	res = login(t, h, "192.168.1.50:40000", "alice", "correct")
+	token := res.body["token"].(string)
+	srv.config.Auth.Passwords[0].AllowedSources = []config.AllowedIP{{IP: "10.0.0.0/8"}}
+	res = doRequest(t, h, http.MethodGet, "/health", "192.168.1.50:40001", "", withBearer(token))
+	if res.code != http.StatusForbidden || res.body["error"] != "unauthorized_source_ip" {
+		t.Errorf("Token from removed source: expected 403 unauthorized_source_ip, got %d %v", res.code, res.body["error"])
+	}
+}

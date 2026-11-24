@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -157,6 +158,16 @@ func ExpandPath(path string) string {
 	return path
 }
 
+// validSource reports whether s is an IP address or a CIDR network
+func validSource(s string) bool {
+	if strings.Contains(s, "/") {
+		_, err := netip.ParsePrefix(s)
+		return err == nil
+	}
+	_, err := netip.ParseAddr(s)
+	return err == nil
+}
+
 // Validate checks if the configuration is valid
 func (c *Config) Validate() error {
 	if c.Auth.Enabled {
@@ -166,6 +177,14 @@ func (c *Config) Validate() error {
 
 		if c.Auth.JWT.SecretFile == "" {
 			return fmt.Errorf("jwt.secret_file is required when auth is enabled")
+		}
+
+		for _, pw := range c.Auth.Passwords {
+			for _, src := range pw.AllowedSources {
+				if !validSource(src.IP) {
+					return fmt.Errorf("invalid allowed_sources entry %q for password %s: want an IP address or CIDR network", src.IP, pw.Name)
+				}
+			}
 		}
 	}
 

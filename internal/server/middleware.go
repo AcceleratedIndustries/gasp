@@ -41,6 +41,16 @@ func (s *Server) RequireAuth(next http.Handler) http.Handler {
 			return
 		}
 
+		// Sources outside allowed_sources can't use tokens either, so
+		// tightening the list takes effect without waiting for tokens to expire
+		if s.authManager != nil && !s.authManager.IsSourceAllowed(clientIP) {
+			writeForbidden(w, "unauthorized_source_ip", "Access denied. Your IP address is not authorized.",
+				"contact_admin", map[string]interface{}{
+					"source_ip": clientIP,
+				})
+			return
+		}
+
 		// Require authentication for non-localhost or when bypass disabled
 		tokenString := extractBearerToken(r)
 		if tokenString == "" {

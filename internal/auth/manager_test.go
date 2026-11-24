@@ -630,3 +630,37 @@ func TestAuthManager_LoginPwauthUnavailable(t *testing.T) {
 		}
 	})
 }
+
+func TestAuthManager_IsSourceAllowed(t *testing.T) {
+	manager, cfg, _ := newTestManager(t, config.FailedLoginConfig{})
+
+	if !manager.IsSourceAllowed("203.0.113.9") {
+		t.Error("With no allowed_sources, every source should be allowed")
+	}
+
+	cfg.Auth.Passwords = []config.PasswordConfig{
+		{Name: "default", AllowedSources: []config.AllowedIP{
+			{IP: "127.0.0.1"},
+			{IP: "192.168.1.0/24"},
+		}},
+		{Name: "v6", AllowedSources: []config.AllowedIP{
+			{IP: "2001:db8::/32"},
+		}},
+	}
+
+	tests := map[string]bool{
+		"127.0.0.1":     true,
+		"192.168.1.77":  true,
+		"2001:db8::5":   true,
+		"192.168.2.1":   false,
+		"::1":           false,
+		"203.0.113.9":   false,
+		"not-an-ip":     false,
+		"[2001:db8::5]": false,
+	}
+	for ip, want := range tests {
+		if got := manager.IsSourceAllowed(ip); got != want {
+			t.Errorf("IsSourceAllowed(%q) = %v, want %v", ip, got, want)
+		}
+	}
+}
