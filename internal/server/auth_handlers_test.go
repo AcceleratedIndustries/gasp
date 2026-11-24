@@ -148,3 +148,43 @@ func TestHandleLogin_RejectsControlCharacters(t *testing.T) {
 		}
 	}
 }
+
+func TestRequireAuth_BlockedIPDeniedOnProtectedRoutes(t *testing.T) {
+	tests := []struct {
+		name       string
+		remoteAddr string
+		blockedIP  string
+		bypass     bool
+	}{
+		{"remote IPv4", "192.168.1.66:40000", "192.168.1.66", false},
+		{"remote IPv6", "[2001:db8::66]:40000", "2001:db8::66", false},
+		{"localhost with bypass on", "127.0.0.1:40000", "127.0.0.1", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newTestServerWithBlockedIPs(t, tt.blockedIP)
+			srv.config.Auth.LocalhostBypass = tt.bypass
+			h := srv.Handler()
+
+			for _, path := range []string{"/health", "/metrics"} {
+				req := httptest.NewRequest(http.MethodGet, path, nil)
+				req.RemoteAddr = tt.remoteAddr
+				req.Header.Set("Authorization", "Bearer some-token")
+				w := httptest.NewRecorder()
+				h.ServeHTTP(w, req)
+
+				if w.Code != http.StatusForbidden {
+					t.Fatalf("%s: expected 403, got %d: %s", path, w.Code, w.Body.String())
+				}
+				var resp ErrorResponse
+				if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+					t.Fatalf("Failed to decode response: %v", err)
+				}
+				if resp.Error != "ip_blocked" {
+					t.Errorf("%s: expected ip_blocked, got %q", path, resp.Error)
+				}
+			}
+		})
+	}
+}

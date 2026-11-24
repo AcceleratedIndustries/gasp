@@ -17,6 +17,16 @@ func (s *Server) RequireAuth(next http.Handler) http.Handler {
 		// Extract client IP from RemoteAddr
 		clientIP := extractClientIP(r.RemoteAddr)
 
+		// Blocked IPs are denied on every protected route, with or without
+		// a token, and even from localhost
+		if s.authManager != nil && s.authManager.IsIPBlocked(clientIP) {
+			writeForbidden(w, "ip_blocked", "Access denied. Your IP address has been blocked.",
+				"contact_admin", map[string]interface{}{
+					"ip": clientIP,
+				})
+			return
+		}
+
 		// Check localhost bypass
 		if s.config.Auth.LocalhostBypass && isLocalhost(clientIP) {
 			// Allow localhost requests without authentication
