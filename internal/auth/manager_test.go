@@ -554,3 +554,35 @@ func TestAuthManager_FailedLoginPolicyDefaults(t *testing.T) {
 		})
 	}
 }
+
+func TestAuthManager_RevokedSessionStaysRevokedAfterRestart(t *testing.T) {
+	manager, cfg, tmpDir := newTestManager(t, config.FailedLoginConfig{})
+
+	session := NewSession("testuser", "192.168.1.100", "gasp-cli", 24*time.Hour)
+	manager.sessions.Create(session)
+	if err := manager.sessions.Save(); err != nil {
+		t.Fatalf("Failed to save sessions: %v", err)
+	}
+	token, err := manager.tokenManager.GenerateToken(session)
+	if err != nil {
+		t.Fatalf("Failed to generate token: %v", err)
+	}
+
+	// IP binding violation revokes the session.
+	if _, err := manager.ValidateToken(token, "192.168.1.200"); err == nil {
+		t.Fatal("Expected IP binding violation")
+	}
+	manager.Flush()
+
+	// After a restart the session must still be gone.
+	reloaded, err := NewAuthManager(cfg, filepath.Join(tmpDir, "sessions.json"), filepath.Join(tmpDir, "security.json"))
+	if err != nil {
+		t.Fatalf("Failed to reload auth manager: %v", err)
+	}
+	if _, err := reloaded.ValidateToken(token, "192.168.1.100"); err == nil || !strings.Contains(err.Error(), "session not found") {
+		t.Errorf("Revoked token should stay revoked after restart, got err = %v", err)
+	}
+	if !reloaded.IsIPBlocked("192.168.1.200") {
+		t.Error("Offending IP should stay blocked after restart")
+	}
+}

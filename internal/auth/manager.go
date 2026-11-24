@@ -82,6 +82,7 @@ func (am *AuthManager) ValidateToken(tokenString, clientIP string) (*Session, er
 	// Check expiration
 	if session.IsExpired() {
 		am.sessions.Delete(session.TokenID)
+		am.saveSessions()
 		return nil, fmt.Errorf("session expired")
 	}
 
@@ -89,6 +90,7 @@ func (am *AuthManager) ValidateToken(tokenString, clientIP string) (*Session, er
 	if subtle.ConstantTimeCompare([]byte(session.ClientIP), []byte(clientIP)) != 1 {
 		// IP binding violation - revoke token and block IP
 		am.sessions.Delete(session.TokenID)
+		am.saveSessions()
 		am.BlockIP(clientIP, "ip_binding_violation", session.Username, session.TokenID)
 		return nil, fmt.Errorf("IP binding violation")
 	}
@@ -136,6 +138,14 @@ func (am *AuthManager) Login(username, password, clientIP, clientID string, ttl 
 	}
 
 	return session, token, nil
+}
+
+// saveSessions persists the session store, so a revoked session stays
+// revoked after a restart. Failures are logged, not returned.
+func (am *AuthManager) saveSessions() {
+	if err := am.sessions.Save(); err != nil {
+		fmt.Printf("Warning: failed to save sessions: %v\n", err)
+	}
 }
 
 // IsIPBlocked checks if an IP is blocked
