@@ -139,13 +139,12 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-// corsMiddleware adds CORS headers to responses
+// corsMiddleware answers preflight requests. It deliberately grants no
+// cross-origin access: GASP serves CLI and AI clients, not browser pages,
+// and "Access-Control-Allow-Origin: *" let any web page open on this
+// machine read /metrics through the localhost bypass.
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-
 		// Handle preflight requests
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusOK)

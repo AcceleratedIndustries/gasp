@@ -1,7 +1,9 @@
 package server
 
 import (
+	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 )
 
@@ -27,8 +29,12 @@ func (s *Server) RequireAuth(next http.Handler) http.Handler {
 			return
 		}
 
-		// Check localhost bypass
-		if s.config.Auth.LocalhostBypass && isLocalhost(clientIP) {
+		// Check localhost bypass. The Host and Origin checks keep a web page
+		// open in a browser on this machine from using the bypass, either
+		// cross-origin or through DNS rebinding (where Host is the
+		// attacker's domain). Such requests fall through and need a token.
+		if s.config.Auth.LocalhostBypass && isLocalhost(clientIP) &&
+			isLoopbackHost(r.Host) && r.Header.Get("Origin") == "" {
 			// Allow localhost requests without authentication
 			next.ServeHTTP(w, r)
 			return
@@ -106,6 +112,20 @@ func extractClientIP(remoteAddr string) string {
 	}
 
 	return remoteAddr
+}
+
+// isLoopbackHost reports whether a Host header names this machine by a
+// loopback name or address, with or without a port
+func isLoopbackHost(host string) bool {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.TrimSuffix(strings.ToLower(strings.Trim(host, "[]")), ".")
+	if host == "localhost" {
+		return true
+	}
+	addr, err := netip.ParseAddr(host)
+	return err == nil && addr.IsLoopback()
 }
 
 // isLocalhost checks if an IP address is localhost
