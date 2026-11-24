@@ -436,3 +436,80 @@ func TestAuthManager_LoginRejectsControlCharacters(t *testing.T) {
 		t.Error("Failed login should be counted against user root")
 	}
 }
+
+// newTestManager creates an AuthManager in a temp dir with a JWT secret and
+// the given failed-login policy. Background saves are waited for at cleanup.
+func newTestManager(t *testing.T, failedLogin config.FailedLoginConfig) (*AuthManager, *config.Config, string) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	secretFile := filepath.Join(tmpDir, "jwt-secret")
+	secret := []byte("test-secret-key-at-least-32-chars-long-12345")
+	if err := os.WriteFile(secretFile, secret, 0600); err != nil {
+		t.Fatalf("Failed to write secret: %v", err)
+	}
+
+	cfg := &config.Config{
+		Auth: config.AuthConfig{
+			Enabled: true,
+			JWT: config.JWTConfig{
+				SecretFile: secretFile,
+			},
+		},
+		RateLimiting: config.RateLimitingConfig{FailedLogin: failedLogin},
+	}
+
+	manager, err := NewAuthManager(cfg, filepath.Join(tmpDir, "sessions.json"), filepath.Join(tmpDir, "security.json"))
+	if err != nil {
+		t.Fatalf("Failed to create auth manager: %v", err)
+	}
+	t.Cleanup(manager.waitForBackgroundSaves)
+	return manager, cfg, tmpDir
+}
+
+func TestAuthManager_ClearUserLockout(t *testing.T) {
+	manager, cfg, tmpDir := newTestManager(t, config.FailedLoginConfig{
+		MaxAttempts:     2,
+		LockoutDuration: "15m",
+	})
+
+	manager.RecordFailedLogin("alice", "192.168.1.100")
+	manager.RecordFailedLogin("alice", "192.168.1.100")
+	if locked, _ := manager.CheckUserLockout("alice"); !locked {
+		t.Fatal("Expected alice to be locked out")
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- manager.ClearUserLockout("alice") }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("ClearUserLockout failed: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ClearUserLockout did not return: deadlock")
+	}
+
+	if locked, _ := manager.CheckUserLockout("alice"); locked {
+		t.Error("Expected alice to be unlocked")
+	}
+
+	// Other auth calls must still work afterwards.
+	if manager.IsIPBlocked("192.168.1.100") {
+		t.Error("Unexpected block")
+	}
+
+	// The cleared state must be on disk.
+	manager.waitForBackgroundSaves()
+	reloaded, err := NewAuthManager(cfg, filepath.Join(tmpDir, "sessions.json"), filepath.Join(tmpDir, "security.json"))
+	if err != nil {
+		t.Fatalf("Failed to reload auth manager: %v", err)
+	}
+	if locked, _ := reloaded.CheckUserLockout("alice"); locked {
+		t.Error("Cleared lockout should stay cleared after restart")
+	}
+
+	if err := manager.ClearUserLockout("nobody"); err == nil {
+		t.Error("Expected error for user with no lockout")
+	}
+}

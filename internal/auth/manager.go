@@ -343,13 +343,15 @@ func (am *AuthManager) RecordFailedLogin(username, clientIP string) (shouldLock 
 // ClearUserLockout manually clears a user's lockout
 func (am *AuthManager) ClearUserLockout(username string) error {
 	am.mu.Lock()
-	defer am.mu.Unlock()
-
 	lockout, exists := am.userLockouts[username]
 	if !exists {
+		am.mu.Unlock()
 		return fmt.Errorf("no lockout found for user %s", username)
 	}
-
 	clearLockout(lockout)
+	am.mu.Unlock()
+
+	// saveSecurityState takes am.mu itself, so it must run after the
+	// unlock above; sync.RWMutex is not reentrant.
 	return am.saveSecurityState()
 }
