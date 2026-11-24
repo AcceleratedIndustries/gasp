@@ -1,7 +1,10 @@
 package auth
 
 import (
+	"fmt"
+	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -85,5 +88,59 @@ func TestSessionStore_Persistence(t *testing.T) {
 
 	if retrieved.Username != session.Username {
 		t.Errorf("Expected username %s, got %s", session.Username, retrieved.Username)
+	}
+}
+
+func TestSessionStore_ConcurrentSaves(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "sessions.json")
+	store := NewSessionStore(filePath)
+
+	const n = 50
+	const saves = 200
+	var wg sync.WaitGroup
+	errs := make(chan error, n+saves)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			store.Create(NewSession(fmt.Sprintf("user%d", i), "192.168.1.100", "gasp-cli", time.Hour))
+			errs <- store.Save()
+		}(i)
+	}
+	for i := 0; i < saves; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- store.Save()
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Errorf("Concurrent save failed: %v", err)
+		}
+	}
+
+	reloaded := NewSessionStore(filePath)
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("Failed to load sessions: %v", err)
+	}
+	if got := reloaded.Count(); got != n {
+		t.Errorf("Expected %d sessions on disk, got %d", n, got)
+	}
+
+	info, err := os.Stat(filePath)
+	if err != nil {
+		t.Fatalf("Stat failed: %v", err)
+	}
+	if mode := info.Mode().Perm(); mode != 0600 {
+		t.Errorf("Sessions file mode = %o, want 600", mode)
+	}
+
+	leftovers, _ := filepath.Glob(filepath.Join(tmpDir, "*.tmp"))
+	if len(leftovers) > 0 {
+		t.Errorf("Temp files left behind: %v", leftovers)
 	}
 }
