@@ -52,3 +52,34 @@ func TestVerifyPassword(t *testing.T) {
 		t.Error("Incorrectly verified wrong password")
 	}
 }
+
+func TestValidateCredentials(t *testing.T) {
+	tests := []struct {
+		name     string
+		username string
+		password string
+		wantErr  bool
+	}{
+		{"valid", "alice", "correct horse", false},
+		{"tab in password allowed", "alice", "pass\tword", false},
+		{"empty username", "", "secret", true},
+		{"empty password", "alice", "", true},
+		{"newline in username", "root\nGUESS", "x", true},
+		{"carriage return in username", "root\rGUESS", "x", true},
+		{"NUL in username", "root\x00", "x", true},
+		{"tab in username", "root\t", "x", true},
+		{"DEL in username", "root\x7f", "x", true},
+		{"newline in password", "alice", "secret\nextra", true},
+		{"carriage return in password", "alice", "secret\r", true},
+		{"NUL in password", "alice", "sec\x00ret", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateCredentials(tt.username, tt.password)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateCredentials(%q, %q) error = %v, wantErr %v", tt.username, tt.password, err, tt.wantErr)
+			}
+		})
+	}
+}

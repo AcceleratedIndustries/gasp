@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/accelerated-industries/gasp/internal/auth"
 )
 
 // LoginRequest represents a login request body
@@ -35,8 +37,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Extract client IP
-	clientIP := strings.Split(r.RemoteAddr, ":")[0]
+	// Extract client IP the same way RequireAuth does, so the IP bound to
+	// the session matches the IP seen on later requests (IPv6 included)
+	clientIP := extractClientIP(r.RemoteAddr)
 
 	// Check if IP is blocked
 	if s.authManager != nil && s.authManager.IsIPBlocked(clientIP) {
@@ -69,6 +72,12 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if username == "" || password == "" {
 		writeBadRequest(w, "malformed_request",
 			"Username and password are required.", "fix_request")
+		return
+	}
+
+	if err := auth.ValidateCredentials(username, password); err != nil {
+		writeBadRequest(w, "malformed_request",
+			"Username and password must not contain control characters.", "fix_request")
 		return
 	}
 
