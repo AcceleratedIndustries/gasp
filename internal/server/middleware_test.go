@@ -260,3 +260,50 @@ func TestNoCrossOriginAccess(t *testing.T) {
 		}
 	}
 }
+
+func TestLocalhostBypass_ProxiedAndNonLoopback(t *testing.T) {
+	cfg := &config.Config{
+		Auth: config.AuthConfig{
+			Enabled:         true,
+			LocalhostBypass: true,
+		},
+	}
+	srv := &Server{config: cfg}
+	handler := srv.RequireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	tests := []struct {
+		name       string
+		remoteAddr string
+		header     string
+		value      string
+		wantCode   int
+	}{
+		{"proxy X-Forwarded-For", "127.0.0.1:12345", "X-Forwarded-For", "203.0.113.9", http.StatusUnauthorized},
+		{"proxy X-Real-IP", "127.0.0.1:12345", "X-Real-IP", "203.0.113.9", http.StatusUnauthorized},
+		{"proxy Forwarded", "127.0.0.1:12345", "Forwarded", "for=203.0.113.9", http.StatusUnauthorized},
+		{"proxy X-Forwarded-Host", "127.0.0.1:12345", "X-Forwarded-Host", "gasp.example", http.StatusUnauthorized},
+		// A remote client can't claim to be local with a header.
+		{"spoofed X-Forwarded-For", "192.168.1.100:12345", "X-Forwarded-For", "127.0.0.1", http.StatusUnauthorized},
+		// Only 127.0.0.1 and ::1 are local; pin that.
+		{"127.0.0.2", "127.0.0.2:12345", "", "", http.StatusUnauthorized},
+		{"IPv4-mapped loopback", "[::ffff:127.0.0.1]:12345", "", "", http.StatusUnauthorized},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "http://localhost:8080/metrics", nil)
+			req.RemoteAddr = tt.remoteAddr
+			if tt.header != "" {
+				req.Header.Set(tt.header, tt.value)
+			}
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+
+			if w.Code != tt.wantCode {
+				t.Errorf("Expected %d, got %d", tt.wantCode, w.Code)
+			}
+		})
+	}
+}

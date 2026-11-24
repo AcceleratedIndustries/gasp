@@ -34,7 +34,8 @@ func (s *Server) RequireAuth(next http.Handler) http.Handler {
 		// cross-origin or through DNS rebinding (where Host is the
 		// attacker's domain). Such requests fall through and need a token.
 		if s.config.Auth.LocalhostBypass && isLocalhost(clientIP) &&
-			isLoopbackHost(r.Host) && r.Header.Get("Origin") == "" {
+			isLoopbackHost(r.Host) && r.Header.Get("Origin") == "" &&
+			!hasProxyHeaders(r) {
 			// Allow localhost requests without authentication
 			next.ServeHTTP(w, r)
 			return
@@ -112,6 +113,19 @@ func extractClientIP(remoteAddr string) string {
 	}
 
 	return remoteAddr
+}
+
+// hasProxyHeaders reports whether a request carries headers a reverse
+// proxy adds. Behind a proxy on the same host every request arrives from
+// 127.0.0.1, so such requests must not get the localhost bypass. The
+// header values are never trusted as the client address.
+func hasProxyHeaders(r *http.Request) bool {
+	for _, h := range []string{"Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Real-Ip"} {
+		if r.Header.Get(h) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // isLoopbackHost reports whether a Host header names this machine by a
