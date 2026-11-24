@@ -215,6 +215,8 @@ Configuration file support is planned for Phase 2.
 
 With `auth.localhost_bypass: true`, requests from `127.0.0.1` or `::1` skip authentication. Do not put GASP behind a reverse proxy on the same host with the bypass on: every proxied request arrives from `127.0.0.1`. GASP refuses the bypass for requests carrying `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host` or `X-Real-IP`, but a proxy that adds none of these would still pass every request through unauthenticated. Turn the bypass off when using a proxy. GASP never trusts those headers as the client address.
 
+Direct requests from `127.0.0.1` or `::1` are also never refused as blocked, so an admin on the GASP host can't be locked out of it. Requests carrying the proxy headers above get no such exemption.
+
 ## Architecture
 
 GASP uses a **collector-based architecture** with concurrent metric gathering:

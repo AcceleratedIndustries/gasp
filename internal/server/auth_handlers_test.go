@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -61,10 +62,12 @@ func TestHandleLogin_BlockedIPIsRecognized(t *testing.T) {
 		name       string
 		remoteAddr string
 		blockedIP  string
+		proxied    bool
 	}{
-		{"IPv4", "192.168.1.200:51234", "192.168.1.200"},
-		{"IPv6", "[2001:db8::5]:51234", "2001:db8::5"},
-		{"IPv6 loopback", "[::1]:51234", "::1"},
+		{"IPv4", "192.168.1.200:51234", "192.168.1.200", false},
+		{"IPv6", "[2001:db8::5]:51234", "2001:db8::5", false},
+		// Direct localhost requests are exempt from blocks, but proxied ones are not
+		{"IPv6 loopback through a proxy", "[::1]:51234", "::1", true},
 	}
 
 	for _, tt := range tests {
@@ -74,6 +77,9 @@ func TestHandleLogin_BlockedIPIsRecognized(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "/auth/login",
 				strings.NewReader(`{"username":"alice","password":"secret"}`))
 			req.RemoteAddr = tt.remoteAddr
+			if tt.proxied {
+				req.Header.Set("X-Forwarded-For", "198.51.100.7")
+			}
 			w := httptest.NewRecorder()
 
 			srv.handleLogin(w, req)
@@ -158,7 +164,7 @@ func TestRequireAuth_BlockedIPDeniedOnProtectedRoutes(t *testing.T) {
 	}{
 		{"remote IPv4", "192.168.1.66:40000", "192.168.1.66", false},
 		{"remote IPv6", "[2001:db8::66]:40000", "2001:db8::66", false},
-		{"localhost with bypass on", "127.0.0.1:40000", "127.0.0.1", true},
+		{"proxied localhost with bypass on", "127.0.0.1:40000", "127.0.0.1", true},
 	}
 
 	for _, tt := range tests {
@@ -171,6 +177,9 @@ func TestRequireAuth_BlockedIPDeniedOnProtectedRoutes(t *testing.T) {
 				req := httptest.NewRequest(http.MethodGet, path, nil)
 				req.RemoteAddr = tt.remoteAddr
 				req.Header.Set("Authorization", "Bearer some-token")
+				if tt.bypass {
+					req.Header.Set("X-Forwarded-For", "198.51.100.7")
+				}
 				w := httptest.NewRecorder()
 				h.ServeHTTP(w, req)
 
@@ -236,5 +245,37 @@ func TestDisplayURL(t *testing.T) {
 		if got := displayURL(addr); got != want {
 			t.Errorf("displayURL(%q) = %q, want %q", addr, got, want)
 		}
+	}
+}
+
+// Direct requests from the GASP host itself are never refused as blocked,
+// so an admin on that machine can't be locked out
+func TestBlockedIP_LocalhostExempt(t *testing.T) {
+	for _, ip := range []string{"127.0.0.1", "::1"} {
+		t.Run(ip, func(t *testing.T) {
+			remote := net.JoinHostPort(ip, "40000")
+			srv := newTestServerWithBlockedIPs(t, ip)
+			srv.config.Auth.LocalhostBypass = true
+			h := srv.Handler()
+
+			// Protected route via the localhost bypass
+			req := httptest.NewRequest(http.MethodGet, "http://localhost:8080/health", nil)
+			req.RemoteAddr = remote
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+			if w.Code != http.StatusOK {
+				t.Errorf("/health from %s: expected 200, got %d: %s", ip, w.Code, w.Body.String())
+			}
+
+			// Login is not refused as blocked (it fails later, on credentials)
+			req = httptest.NewRequest(http.MethodPost, "/auth/login",
+				strings.NewReader(`{"username":"nobody","password":"wrong"}`))
+			req.RemoteAddr = remote
+			w = httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+			if strings.Contains(w.Body.String(), "ip_blocked") {
+				t.Errorf("login from %s was refused as blocked: %s", ip, w.Body.String())
+			}
+		})
 	}
 }

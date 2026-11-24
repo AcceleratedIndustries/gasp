@@ -64,8 +64,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// the session matches the IP seen on later requests (IPv6 included)
 	clientIP := extractClientIP(r.RemoteAddr)
 
-	// Check if IP is blocked
-	if s.authManager.IsIPBlocked(clientIP) {
+	// Check if IP is blocked (direct requests from localhost are exempt)
+	if s.isBlocked(r, clientIP) {
 		writeForbidden(w, "ip_blocked", "Access denied. Your IP address has been blocked.",
 			"contact_admin", map[string]interface{}{
 				"ip": clientIP,

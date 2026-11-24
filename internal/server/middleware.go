@@ -20,8 +20,8 @@ func (s *Server) RequireAuth(next http.Handler) http.Handler {
 		clientIP := extractClientIP(r.RemoteAddr)
 
 		// Blocked IPs are denied on every protected route, with or without
-		// a token, and even from localhost
-		if s.authManager != nil && s.authManager.IsIPBlocked(clientIP) {
+		// a token. Direct requests from this machine are exempt.
+		if s.isBlocked(r, clientIP) {
 			writeForbidden(w, "ip_blocked", "Access denied. Your IP address has been blocked.",
 				"contact_admin", map[string]interface{}{
 					"ip": clientIP,
@@ -123,6 +123,21 @@ func extractClientIP(remoteAddr string) string {
 	}
 
 	return remoteAddr
+}
+
+// isBlocked reports whether a request comes from a blocked IP. Direct
+// requests from localhost are never treated as blocked, so an admin on the
+// GASP host can't be locked out of it. A request with reverse-proxy headers
+// gets no exemption, since behind a proxy on this host every client arrives
+// from 127.0.0.1.
+func (s *Server) isBlocked(r *http.Request, clientIP string) bool {
+	if s.authManager == nil {
+		return false
+	}
+	if isLocalhost(clientIP) && !hasProxyHeaders(r) {
+		return false
+	}
+	return s.authManager.IsIPBlocked(clientIP)
 }
 
 // hasProxyHeaders reports whether a request carries headers a reverse
