@@ -31,14 +31,20 @@ func newE2EServer(t *testing.T) (*Server, http.Handler) {
 		t.Skip("/bin/sh not available for fake pwauth")
 	}
 
+	pwauth := filepath.Join(t.TempDir(), "fake-pwauth")
+	if err := os.WriteFile(pwauth, []byte(fakePwauthScript), 0700); err != nil {
+		t.Fatalf("Failed to write fake pwauth: %v", err)
+	}
+	return newE2EServerWithPwauth(t, pwauth)
+}
+
+// newE2EServerWithPwauth is newE2EServer with a chosen pwauth path.
+func newE2EServerWithPwauth(t *testing.T, pwauth string) (*Server, http.Handler) {
+	t.Helper()
 	tmpDir := t.TempDir()
 	secretFile := filepath.Join(tmpDir, "jwt-secret")
 	if err := os.WriteFile(secretFile, []byte("test-secret-key-at-least-32-chars-long-12345"), 0600); err != nil {
 		t.Fatalf("Failed to write secret: %v", err)
-	}
-	pwauth := filepath.Join(tmpDir, "fake-pwauth")
-	if err := os.WriteFile(pwauth, []byte(fakePwauthScript), 0700); err != nil {
-		t.Fatalf("Failed to write fake pwauth: %v", err)
 	}
 
 	cfg := &config.Config{
@@ -263,4 +269,15 @@ func mapValues(m map[string]interface{}) []string {
 		}
 	}
 	return out
+}
+
+func TestLoginFlow_PwauthNotFound(t *testing.T) {
+	_, h := newE2EServerWithPwauth(t, filepath.Join(t.TempDir(), "no-such-pwauth"))
+
+	for i := 0; i < 4; i++ {
+		res := login(t, h, "192.168.1.50:40000", "alice", "correct")
+		if res.code != http.StatusServiceUnavailable || res.body["error"] != "pwauth_not_found" {
+			t.Fatalf("Attempt %d: expected 503 pwauth_not_found, got %d %v", i+1, res.code, res.body["error"])
+		}
+	}
 }

@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -107,7 +108,15 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// Authenticate and create session
 	session, token, err := s.authManager.Login(username, password, clientIP, "gasp-cli", ttl)
 	if err != nil {
-		if strings.Contains(err.Error(), "locked out") {
+		if errors.Is(err, auth.ErrPwauthNotFound) {
+			writeErrorResponse(w, http.StatusServiceUnavailable, "pwauth_not_found",
+				"PAM authentication service not available. pwauth binary not found.",
+				"install_pwauth", nil)
+		} else if errors.Is(err, auth.ErrPwauthTimeout) {
+			writeErrorResponse(w, http.StatusServiceUnavailable, "authentication_timeout",
+				"Authentication service did not respond in time.",
+				"retry_later", nil)
+		} else if strings.Contains(err.Error(), "locked out") {
 			writeUnauthorized(w, "user_locked_out", err.Error(), "wait_or_contact_admin")
 		} else {
 			writeUnauthorized(w, "invalid_credentials", "Authentication failed. Invalid username or password.", "verify_credentials")

@@ -3,6 +3,7 @@ package auth
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -113,6 +114,12 @@ func (am *AuthManager) Login(username, password, clientIP, clientID string, ttl 
 
 	// Authenticate via PAM
 	if err := am.pamAuth.Authenticate(username, password); err != nil {
+		// pwauth missing or hung: the password was never checked, so this
+		// is not a failed attempt
+		if errors.Is(err, ErrPwauthNotFound) || errors.Is(err, ErrPwauthTimeout) {
+			return nil, "", err
+		}
+
 		// Record failed attempt
 		shouldLock, lockedUntil := am.RecordFailedLogin(username, clientIP)
 		if shouldLock {

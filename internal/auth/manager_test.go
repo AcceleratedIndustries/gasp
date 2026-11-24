@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -585,4 +586,47 @@ func TestAuthManager_RevokedSessionStaysRevokedAfterRestart(t *testing.T) {
 	if !reloaded.IsIPBlocked("192.168.1.200") {
 		t.Error("Offending IP should stay blocked after restart")
 	}
+}
+
+func TestAuthManager_LoginPwauthUnavailable(t *testing.T) {
+	if _, err := exec.LookPath("/bin/sh"); err != nil {
+		t.Skip("/bin/sh not available for fake pwauth")
+	}
+
+	t.Run("missing pwauth", func(t *testing.T) {
+		manager, _, tmpDir := newTestManager(t, config.FailedLoginConfig{MaxAttempts: 2})
+		manager.pamAuth.pwauthPath = filepath.Join(tmpDir, "no-such-pwauth")
+
+		for i := 0; i < 5; i++ {
+			_, _, err := manager.Login("alice", "secret", "192.168.1.100", "gasp-cli", time.Hour)
+			if !errors.Is(err, ErrPwauthNotFound) {
+				t.Fatalf("Attempt %d: expected ErrPwauthNotFound, got %v", i+1, err)
+			}
+		}
+		if locked, _ := manager.CheckUserLockout("alice"); locked {
+			t.Error("A missing pwauth must not lock the user out")
+		}
+	})
+
+	t.Run("hung pwauth", func(t *testing.T) {
+		manager, _, tmpDir := newTestManager(t, config.FailedLoginConfig{MaxAttempts: 1})
+		script := filepath.Join(tmpDir, "slow-pwauth")
+		if err := os.WriteFile(script, []byte("#!/bin/sh\nsleep 30\n"), 0700); err != nil {
+			t.Fatalf("Failed to write script: %v", err)
+		}
+		manager.pamAuth.pwauthPath = script
+		manager.pamAuth.timeout = 200 * time.Millisecond
+
+		start := time.Now()
+		_, _, err := manager.Login("alice", "secret", "192.168.1.100", "gasp-cli", time.Hour)
+		if !errors.Is(err, ErrPwauthTimeout) {
+			t.Fatalf("Expected ErrPwauthTimeout, got %v", err)
+		}
+		if elapsed := time.Since(start); elapsed > 5*time.Second {
+			t.Errorf("Login took %v; the timeout did not stop pwauth", elapsed)
+		}
+		if locked, _ := manager.CheckUserLockout("alice"); locked {
+			t.Error("A hung pwauth must not lock the user out")
+		}
+	})
 }

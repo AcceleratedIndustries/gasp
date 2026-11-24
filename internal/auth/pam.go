@@ -2,23 +2,43 @@ package auth
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 	"unicode"
 
 	"golang.org/x/crypto/bcrypt"
 )
 
+// Errors that mean the password could not be checked at all. They are not
+// the user's fault, so they don't count toward the failed-login lockout.
+var (
+	ErrPwauthNotFound = errors.New("pwauth not found (authentication unavailable)")
+	ErrPwauthTimeout  = errors.New("pwauth did not respond in time")
+)
+
+const (
+	defaultPwauthTimeout = 10 * time.Second
+	// maxConcurrentPwauth caps how many pwauth processes run at once
+	maxConcurrentPwauth = 8
+)
+
 // PAMAuthenticator handles authentication via pwauth
 type PAMAuthenticator struct {
 	pwauthPath string
+	timeout    time.Duration
+	slots      chan struct{}
 }
 
 // NewPAMAuthenticator creates a new PAM authenticator
 func NewPAMAuthenticator() *PAMAuthenticator {
 	return &PAMAuthenticator{
 		pwauthPath: "/usr/bin/pwauth",
+		timeout:    defaultPwauthTimeout,
+		slots:      make(chan struct{}, maxConcurrentPwauth),
 	}
 }
 
@@ -50,11 +70,25 @@ func (p *PAMAuthenticator) Authenticate(username, password string) error {
 
 	// Check if pwauth exists
 	if _, err := exec.LookPath(p.pwauthPath); err != nil {
-		return fmt.Errorf("pwauth not found (authentication unavailable): %w", err)
+		return fmt.Errorf("%w: %s", ErrPwauthNotFound, p.pwauthPath)
+	}
+
+	// Bound both the wait for a free slot and the pwauth run itself, so a
+	// hung helper can't tie up goroutines forever
+	ctx, cancel := context.WithTimeout(context.Background(), p.timeout)
+	defer cancel()
+
+	select {
+	case p.slots <- struct{}{}:
+		defer func() { <-p.slots }()
+	case <-ctx.Done():
+		return ErrPwauthTimeout
 	}
 
 	// Execute pwauth with username\npassword\n on stdin
-	cmd := exec.Command(p.pwauthPath)
+	cmd := exec.CommandContext(ctx, p.pwauthPath)
+	// Don't wait on output pipes held open by a killed helper's children
+	cmd.WaitDelay = time.Second
 
 	stdin := bytes.NewBufferString(username + "\n" + password + "\n")
 	cmd.Stdin = stdin
@@ -66,6 +100,9 @@ func (p *PAMAuthenticator) Authenticate(username, password string) error {
 
 	// pwauth returns 0 for success, non-zero for failure
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return ErrPwauthTimeout
+		}
 		// Log the error details but return generic message
 		return fmt.Errorf("authentication failed")
 	}
