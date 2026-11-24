@@ -188,3 +188,39 @@ func TestRequireAuth_BlockedIPDeniedOnProtectedRoutes(t *testing.T) {
 		})
 	}
 }
+
+func TestHandleLogin_WithoutAuthManager(t *testing.T) {
+	tests := []struct {
+		name     string
+		srv      *Server
+		wantCode int
+		wantErr  string
+	}{
+		{"auth disabled", &Server{config: &config.Config{}}, http.StatusNotFound, "authentication_disabled"},
+		{"no config", &Server{}, http.StatusNotFound, "authentication_disabled"},
+		{"auth enabled but no manager", &Server{config: &config.Config{Auth: config.AuthConfig{Enabled: true}}},
+			http.StatusServiceUnavailable, "authentication_service_unavailable"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/auth/login",
+				strings.NewReader(`{"username":"alice","password":"secret"}`))
+			req.RemoteAddr = "192.168.1.100:51234"
+			w := httptest.NewRecorder()
+
+			tt.srv.Handler().ServeHTTP(w, req)
+
+			if w.Code != tt.wantCode {
+				t.Fatalf("Expected %d, got %d: %s", tt.wantCode, w.Code, w.Body.String())
+			}
+			var resp ErrorResponse
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("Expected a JSON error, got %q", w.Body.String())
+			}
+			if resp.Error != tt.wantErr {
+				t.Errorf("Expected %s, got %q", tt.wantErr, resp.Error)
+			}
+		})
+	}
+}

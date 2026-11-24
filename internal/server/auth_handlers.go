@@ -37,12 +37,29 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Without auth there is nothing to log in to, and without an auth
+	// manager the login below would dereference nil
+	if s.config == nil || !s.config.Auth.Enabled {
+		writeErrorResponse(w, http.StatusNotFound, "authentication_disabled",
+			"Authentication is disabled on this server. No login is needed.",
+			"no_auth_required", nil)
+		return
+	}
+	if s.authManager == nil {
+		writeErrorResponse(w, http.StatusServiceUnavailable,
+			"authentication_service_unavailable",
+			"Authentication service is not available.",
+			"retry_later",
+			nil)
+		return
+	}
+
 	// Extract client IP the same way RequireAuth does, so the IP bound to
 	// the session matches the IP seen on later requests (IPv6 included)
 	clientIP := extractClientIP(r.RemoteAddr)
 
 	// Check if IP is blocked
-	if s.authManager != nil && s.authManager.IsIPBlocked(clientIP) {
+	if s.authManager.IsIPBlocked(clientIP) {
 		writeForbidden(w, "ip_blocked", "Access denied. Your IP address has been blocked.",
 			"contact_admin", map[string]interface{}{
 				"ip": clientIP,
