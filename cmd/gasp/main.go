@@ -2,9 +2,12 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 
 	"github.com/accelerated-industries/gasp/internal/auth"
 	"github.com/accelerated-industries/gasp/internal/collectors"
@@ -15,6 +18,28 @@ import (
 var (
 	version = "0.1.0-dev"
 )
+
+// resolveListenAddress picks the address to listen on. server.listen_address
+// is used as given; an explicit --port flag replaces only its port. With no
+// listen_address, GASP listens on all interfaces at --port.
+func resolveListenAddress(listenAddress string, port int, portFlagSet bool) (string, error) {
+	if listenAddress == "" {
+		return fmt.Sprintf(":%d", port), nil
+	}
+
+	host, portStr, err := net.SplitHostPort(listenAddress)
+	if err != nil {
+		return "", fmt.Errorf("invalid server.listen_address %q: %w", listenAddress, err)
+	}
+	if p, err := strconv.Atoi(portStr); err != nil || p < 1 || p > 65535 {
+		return "", fmt.Errorf("invalid port in server.listen_address %q", listenAddress)
+	}
+
+	if portFlagSet {
+		return net.JoinHostPort(host, strconv.Itoa(port)), nil
+	}
+	return listenAddress, nil
+}
 
 func main() {
 	// Parse command-line flags
@@ -68,18 +93,23 @@ func main() {
 	manager.Register(collectors.NewMemoryCollector())
 	log.Println("Registered CPU and Memory collectors")
 
-	// Determine listen port from config or flag
-	listenPort := *port
-	if cfg.Server.ListenAddress != "" {
-		// Parse port from listen_address if specified
-		// For now, use flag-provided port
-		// TODO: Parse port from cfg.Server.ListenAddress
+	// Determine listen address from config and flag
+	portFlagSet := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "port" {
+			portFlagSet = true
+		}
+	})
+	listenAddr, err := resolveListenAddress(cfg.Server.ListenAddress, *port, portFlagSet)
+	if err != nil {
+		log.Fatalf("Invalid configuration: %v", err)
 	}
 
 	// Create and start HTTP server
 	serverConfig := server.Config{
-		Port:    listenPort,
+		Port:    *port,
 		Version: version,
+		Address: listenAddr,
 	}
 
 	srv := server.NewServer(manager, serverConfig)

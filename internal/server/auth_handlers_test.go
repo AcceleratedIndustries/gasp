@@ -224,3 +224,17 @@ func TestHandleLogin_WithoutAuthManager(t *testing.T) {
 		})
 	}
 }
+
+func TestDisplayURL(t *testing.T) {
+	tests := map[string]string{
+		":8080":          "http://localhost:8080",
+		"0.0.0.0:8080":   "http://localhost:8080",
+		"127.0.0.1:9090": "http://127.0.0.1:9090",
+		"[::1]:9090":     "http://[::1]:9090",
+	}
+	for addr, want := range tests {
+		if got := displayURL(addr); got != want {
+			t.Errorf("displayURL(%q) = %q, want %q", addr, got, want)
+		}
+	}
+}

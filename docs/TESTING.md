@@ -68,7 +68,7 @@ Create `~/.config/gasp/config.yaml`:
 
 ```yaml
 server:
-  listen_address: "127.0.0.1:9090"
+  listen_address: "127.0.0.1:8080"
 
 mode: "spoke"
 
@@ -133,11 +133,11 @@ rate_limiting:
    2024/12/22 16:00:00 Registering collectors...
    2024/12/22 16:00:00 Registered CPU and Memory collectors
    2024/12/22 16:00:00 Authentication enabled
-   2024/12/22 16:00:00 Starting GASP server on :8080
+   2024/12/22 16:00:00 Starting GASP server on 127.0.0.1:8080
    2024/12/22 16:00:00 Endpoints:
-   2024/12/22 16:00:00   http://localhost:8080/health  - Health check
-   2024/12/22 16:00:00   http://localhost:8080/metrics - System metrics
-   2024/12/22 16:00:00   http://localhost:8080/version - Version info
+   2024/12/22 16:00:00   http://127.0.0.1:8080/health  - Health check
+   2024/12/22 16:00:00   http://127.0.0.1:8080/metrics - System metrics
+   2024/12/22 16:00:00   http://127.0.0.1:8080/version - Version info
    ```
 
 3. **Verify:**

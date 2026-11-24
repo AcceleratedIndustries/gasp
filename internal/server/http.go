@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"time"
 
@@ -19,12 +20,16 @@ type Server struct {
 	config      *config.Config
 	version     string
 	port        int
+	address     string
 }
 
 // Config holds server configuration
 type Config struct {
 	Port    int
 	Version string
+	// Address is the host:port to listen on. If empty, the server listens
+	// on all interfaces at Port.
+	Address string
 }
 
 // NewServer creates a new HTTP server
@@ -34,6 +39,7 @@ func NewServer(manager *collectors.Manager, config Config) *Server {
 		authManager: nil, // Set separately via SetAuthManager
 		version:     config.Version,
 		port:        config.Port,
+		address:     config.Address,
 	}
 }
 
@@ -67,14 +73,30 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) Start() error {
 	handler := s.Handler()
 
-	addr := fmt.Sprintf(":%d", s.port)
+	addr := s.address
+	if addr == "" {
+		addr = fmt.Sprintf(":%d", s.port)
+	}
+	base := displayURL(addr)
 	log.Printf("Starting GASP server on %s", addr)
 	log.Printf("Endpoints:")
-	log.Printf("  http://localhost%s/health  - Health check", addr)
-	log.Printf("  http://localhost%s/metrics - System metrics", addr)
-	log.Printf("  http://localhost%s/version - Version info", addr)
+	log.Printf("  %s/health  - Health check", base)
+	log.Printf("  %s/metrics - System metrics", base)
+	log.Printf("  %s/version - Version info", base)
 
 	return http.ListenAndServe(addr, handler)
+}
+
+// displayURL turns a listen address into a URL for log messages
+func displayURL(addr string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "http://" + addr
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "localhost"
+	}
+	return "http://" + net.JoinHostPort(host, port)
 }
 
 // handleHealth returns a simple health check response
