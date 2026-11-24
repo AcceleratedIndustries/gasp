@@ -513,3 +513,44 @@ func TestAuthManager_ClearUserLockout(t *testing.T) {
 		t.Error("Expected error for user with no lockout")
 	}
 }
+
+func TestAuthManager_FailedLoginPolicyDefaults(t *testing.T) {
+	tests := []struct {
+		name        string
+		policy      config.FailedLoginConfig
+		wantAttempt int
+		wantLockout time.Duration
+	}{
+		{"missing rate_limiting section", config.FailedLoginConfig{}, 5, 15 * time.Minute},
+		{"invalid lockout duration", config.FailedLoginConfig{MaxAttempts: 2, LockoutDuration: "banana"}, 2, 15 * time.Minute},
+		{"zero lockout duration", config.FailedLoginConfig{MaxAttempts: 2, LockoutDuration: "0s"}, 2, 15 * time.Minute},
+		{"configured values", config.FailedLoginConfig{MaxAttempts: 3, LockoutDuration: "1h"}, 3, time.Hour},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manager, _, _ := newTestManager(t, tt.policy)
+
+			for i := 1; i < tt.wantAttempt; i++ {
+				if locked, _ := manager.RecordFailedLogin("alice", "192.168.1.100"); locked {
+					t.Fatalf("Locked after %d attempts, want lock at %d", i, tt.wantAttempt)
+				}
+				if locked, _ := manager.CheckUserLockout("alice"); locked {
+					t.Fatalf("CheckUserLockout reports locked after %d attempts", i)
+				}
+			}
+
+			before := time.Now()
+			locked, until := manager.RecordFailedLogin("alice", "192.168.1.100")
+			if !locked {
+				t.Fatalf("Expected lock at attempt %d", tt.wantAttempt)
+			}
+			if d := until.Sub(before); d < tt.wantLockout-time.Second || d > tt.wantLockout+time.Second {
+				t.Errorf("Lockout lasts %v, want about %v", d, tt.wantLockout)
+			}
+			if locked, _ := manager.CheckUserLockout("alice"); !locked {
+				t.Error("A reported lockout must actually lock the user")
+			}
+		})
+	}
+}

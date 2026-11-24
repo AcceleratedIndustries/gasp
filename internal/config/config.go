@@ -169,5 +169,27 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	// Failed-login settings are optional (defaults: 5 attempts, 15m lockout,
+	// 5m window), but values that are given must be usable
+	fl := c.RateLimiting.FailedLogin
+	if fl.MaxAttempts < 0 {
+		return fmt.Errorf("rate_limiting.failed_login.max_attempts must not be negative")
+	}
+	for name, value := range map[string]string{
+		"lockout_duration": fl.LockoutDuration,
+		"window_duration":  fl.WindowDuration,
+	} {
+		if value == "" {
+			continue
+		}
+		d, err := time.ParseDuration(value)
+		if err != nil {
+			return fmt.Errorf("invalid rate_limiting.failed_login.%s %q: %w", name, value, err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("rate_limiting.failed_login.%s must be positive", name)
+		}
+	}
+
 	return nil
 }

@@ -318,22 +318,14 @@ func (am *AuthManager) RecordFailedLogin(username, clientIP string) (shouldLock 
 		am.userLockouts[username] = lockout
 	}
 
-	// Cleanup old attempts (5 minute window by default)
-	windowDuration := 5 * time.Minute
-	if am.config.RateLimiting.FailedLogin.WindowDuration != "" {
-		if d, err := time.ParseDuration(am.config.RateLimiting.FailedLogin.WindowDuration); err == nil {
-			windowDuration = d
-		}
-	}
+	maxAttempts, lockoutDuration, windowDuration := am.failedLoginPolicy()
 	cleanupOldAttempts(lockout, windowDuration)
 
 	// Record attempt
 	recordFailedAttempt(lockout, clientIP)
 
 	// Check if should lock
-	maxAttempts := am.config.RateLimiting.FailedLogin.MaxAttempts
 	if shouldLockUser(lockout, maxAttempts) {
-		lockoutDuration, _ := time.ParseDuration(am.config.RateLimiting.FailedLogin.LockoutDuration)
 		lockUser(lockout, lockoutDuration)
 
 		// Save security state
@@ -343,6 +335,39 @@ func (am *AuthManager) RecordFailedLogin(username, clientIP string) (shouldLock 
 	}
 
 	return false, time.Time{}
+}
+
+// Default failed-login policy, used for any rate_limiting.failed_login
+// setting that is missing or invalid
+const (
+	defaultMaxFailedAttempts = 5
+	defaultLockoutDuration   = 15 * time.Minute
+	defaultAttemptWindow     = 5 * time.Minute
+)
+
+// failedLoginPolicy returns the configured failed-login policy, falling
+// back to the defaults for missing or invalid values. Without this, a
+// config with no rate_limiting section gave max_attempts 0 and a zero
+// lockout: every failure reported "locked out" but nothing was locked.
+func (am *AuthManager) failedLoginPolicy() (maxAttempts int, lockout, window time.Duration) {
+	fl := am.config.RateLimiting.FailedLogin
+
+	maxAttempts = fl.MaxAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = defaultMaxFailedAttempts
+	}
+
+	lockout = defaultLockoutDuration
+	if d, err := time.ParseDuration(fl.LockoutDuration); err == nil && d > 0 {
+		lockout = d
+	}
+
+	window = defaultAttemptWindow
+	if d, err := time.ParseDuration(fl.WindowDuration); err == nil && d > 0 {
+		window = d
+	}
+
+	return maxAttempts, lockout, window
 }
 
 // ClearUserLockout manually clears a user's lockout
