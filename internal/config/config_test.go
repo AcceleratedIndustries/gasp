@@ -326,3 +326,39 @@ func TestValidate_AllowedSources(t *testing.T) {
 		}
 	}
 }
+
+func TestValidate_ServerTimeouts(t *testing.T) {
+	tests := []struct {
+		name      string
+		server    ServerConfig
+		expectErr bool
+	}{
+		{"unset uses defaults", ServerConfig{}, false},
+		{"positive values", ServerConfig{ReadTimeout: 30 * time.Second, WriteTimeout: time.Minute}, false},
+		{"negative read timeout", ServerConfig{ReadTimeout: -time.Second}, true},
+		{"negative write timeout", ServerConfig{WriteTimeout: -time.Second}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{Server: tt.server}
+			if err := cfg.Validate(); (err != nil) != tt.expectErr {
+				t.Errorf("Validate() error = %v, expectErr %v", err, tt.expectErr)
+			}
+		})
+	}
+}
+
+func TestLoadConfig_ServerTimeouts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	data := "server:\n  listen_address: \"127.0.0.1:8080\"\n  read_timeout: 15s\n  write_timeout: 45s\n"
+	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Server.ReadTimeout != 15*time.Second || cfg.Server.WriteTimeout != 45*time.Second {
+		t.Errorf("Expected 15s and 45s, got %v and %v", cfg.Server.ReadTimeout, cfg.Server.WriteTimeout)
+	}
+}

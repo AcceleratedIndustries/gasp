@@ -11,6 +11,11 @@ import (
 	"github.com/accelerated-industries/gasp/internal/auth"
 )
 
+// maxLoginBodyBytes caps the login request body. A username and password
+// fit in far less; the cap stops a client from making the server read an
+// arbitrarily large body.
+const maxLoginBodyBytes = 64 << 10
+
 // LoginRequest represents a login request body
 type LoginRequest struct {
 	Username string `json:"username"`
@@ -89,7 +94,14 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	} else {
 		// Try JSON body
 		var loginReq LoginRequest
+		r.Body = http.MaxBytesReader(w, r.Body, maxLoginBodyBytes)
 		if err := json.NewDecoder(r.Body).Decode(&loginReq); err != nil {
+			var tooLarge *http.MaxBytesError
+			if errors.As(err, &tooLarge) {
+				writeErrorResponse(w, http.StatusRequestEntityTooLarge, "request_too_large",
+					"Request body is too large.", "fix_request", nil)
+				return
+			}
 			writeBadRequest(w, "malformed_request",
 				"Request body is malformed or missing required fields.", "fix_request")
 			return

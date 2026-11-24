@@ -314,3 +314,21 @@ func TestLoginFlow_AllowedSources(t *testing.T) {
 		t.Errorf("Token from removed source: expected 403 unauthorized_source_ip, got %d %v", res.code, res.body["error"])
 	}
 }
+
+func TestLoginFlow_BodyTooLarge(t *testing.T) {
+	_, h := newE2EServer(t)
+
+	body := `{"username":"alice","password":"` + strings.Repeat("x", 2*maxLoginBodyBytes) + `"}`
+	res := doRequest(t, h, http.MethodPost, "/auth/login", "192.0.2.10:1234", body, nil)
+	if res.code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("Expected 413, got %d: %v", res.code, res.body)
+	}
+	if res.body["error"] != "request_too_large" {
+		t.Errorf("Expected request_too_large, got %v", res.body["error"])
+	}
+
+	// A normal-sized login still works
+	if res := login(t, h, "192.0.2.10:1234", "alice", "correct"); res.code != http.StatusOK {
+		t.Errorf("Expected normal login to succeed, got %d: %v", res.code, res.body)
+	}
+}

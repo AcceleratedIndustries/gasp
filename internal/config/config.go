@@ -170,6 +170,13 @@ func validSource(s string) bool {
 
 // Validate checks if the configuration is valid
 func (c *Config) Validate() error {
+	if c.Server.ReadTimeout < 0 {
+		return fmt.Errorf("server.read_timeout must not be negative")
+	}
+	if c.Server.WriteTimeout < 0 {
+		return fmt.Errorf("server.write_timeout must not be negative")
+	}
+
 	if c.Auth.Enabled {
 		if len(c.Auth.Passwords) == 0 {
 			return fmt.Errorf("auth enabled but no passwords configured")

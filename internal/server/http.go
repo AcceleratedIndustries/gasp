@@ -21,6 +21,9 @@ type Server struct {
 	version     string
 	port        int
 	address     string
+
+	readTimeout  time.Duration
+	writeTimeout time.Duration
 }
 
 // Config holds server configuration
@@ -30,7 +33,20 @@ type Config struct {
 	// Address is the host:port to listen on. If empty, the server listens
 	// on all interfaces at Port.
 	Address string
+	// ReadTimeout and WriteTimeout bound how long a client may take to send
+	// a request and to receive the response. Zero means the default.
+	ReadTimeout  time.Duration
+	WriteTimeout time.Duration
 }
+
+// Default HTTP timeouts, used when the config leaves them unset. They stop
+// slow clients from holding connections open indefinitely.
+const (
+	defaultReadHeaderTimeout = 10 * time.Second
+	defaultReadTimeout       = 30 * time.Second
+	defaultWriteTimeout      = 60 * time.Second
+	defaultIdleTimeout       = 120 * time.Second
+)
 
 // NewServer creates a new HTTP server
 func NewServer(manager *collectors.Manager, config Config) *Server {
@@ -40,6 +56,9 @@ func NewServer(manager *collectors.Manager, config Config) *Server {
 		version:     config.Version,
 		port:        config.Port,
 		address:     config.Address,
+
+		readTimeout:  config.ReadTimeout,
+		writeTimeout: config.WriteTimeout,
 	}
 }
 
@@ -84,7 +103,32 @@ func (s *Server) Start() error {
 	log.Printf("  %s/metrics - System metrics", base)
 	log.Printf("  %s/version - Version info", base)
 
-	return http.ListenAndServe(addr, handler)
+	return s.httpServer(addr, handler).ListenAndServe()
+}
+
+// httpServer builds the *http.Server with timeouts applied
+func (s *Server) httpServer(addr string, handler http.Handler) *http.Server {
+	readTimeout := s.readTimeout
+	if readTimeout <= 0 {
+		readTimeout = defaultReadTimeout
+	}
+	writeTimeout := s.writeTimeout
+	if writeTimeout <= 0 {
+		writeTimeout = defaultWriteTimeout
+	}
+	readHeaderTimeout := defaultReadHeaderTimeout
+	if readHeaderTimeout > readTimeout {
+		readHeaderTimeout = readTimeout
+	}
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      writeTimeout,
+		IdleTimeout:       defaultIdleTimeout,
+		MaxHeaderBytes:    1 << 20,
+	}
 }
 
 // displayURL turns a listen address into a URL for log messages

@@ -110,6 +110,9 @@ func main() {
 		Port:    *port,
 		Version: version,
 		Address: listenAddr,
+
+		ReadTimeout:  cfg.Server.ReadTimeout,
+		WriteTimeout: cfg.Server.WriteTimeout,
 	}
 
 	srv := server.NewServer(manager, serverConfig)
