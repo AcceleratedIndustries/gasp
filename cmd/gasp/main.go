@@ -93,6 +93,21 @@ func main() {
 	manager.Register(collectors.NewMemoryCollector())
 	log.Println("Registered CPU and Memory collectors")
 
+	// State directory (XDG_STATE_HOME/gasp or ~/.local/state/gasp)
+	stateDir, stateDirErr := resolveStateDir()
+
+	if pkgSettings := cfg.Collection.Packages.Resolve(); pkgSettings.Enabled {
+		pkgStateDir := stateDir
+		if stateDirErr != nil {
+			log.Printf("Package collector: no state directory (%v); first-seen times will not survive restarts", stateDirErr)
+			pkgStateDir = ""
+		}
+		pkgCollector := collectors.NewPackageCollector(pkgSettings, pkgStateDir)
+		pkgCollector.Start()
+		manager.Register(pkgCollector)
+		log.Println("Registered package update collector")
+	}
+
 	// Determine listen address from config and flag
 	portFlagSet := false
 	flag.Visit(func(f *flag.Flag) {
@@ -120,16 +135,8 @@ func main() {
 
 	// Initialize auth manager if auth is enabled
 	if cfg.Auth.Enabled {
-		// Determine state directory (XDG_STATE_HOME or ~/.local/state)
-		stateDir := os.Getenv("XDG_STATE_HOME")
-		if stateDir == "" {
-			home, err := os.UserHomeDir()
-			if err != nil {
-				log.Fatalf("Failed to get home directory: %v", err)
-			}
-			stateDir = filepath.Join(home, ".local", "state", "gasp")
-		} else {
-			stateDir = filepath.Join(stateDir, "gasp")
+		if stateDirErr != nil {
+			log.Fatalf("Failed to get home directory: %v", stateDirErr)
 		}
 
 		// Create state directory if it doesn't exist
@@ -153,4 +160,17 @@ func main() {
 
 	// Start server (blocking)
 	log.Fatal(srv.Start())
+}
+
+// resolveStateDir returns $XDG_STATE_HOME/gasp, or ~/.local/state/gasp.
+// It does not create the directory.
+func resolveStateDir() (string, error) {
+	if dir := os.Getenv("XDG_STATE_HOME"); dir != "" {
+		return filepath.Join(dir, "gasp"), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".local", "state", "gasp"), nil
 }

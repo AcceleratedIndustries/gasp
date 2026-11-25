@@ -133,6 +133,10 @@ func (m *Manager) assembleSnapshot(results chan CollectorResult) (*types.SystemS
 			if desktop, ok := result.Data.(types.DesktopMetrics); ok {
 				snapshot.Desktop = &desktop
 			}
+		case "packages":
+			if pkgs, ok := result.Data.(types.PackageMetrics); ok {
+				snapshot.Packages = &pkgs
+			}
 		}
 	}
 
@@ -177,6 +181,25 @@ func (m *Manager) updateSummary(snapshot *types.SystemSnapshot) {
 		score -= 10
 	}
 
+	// Package updates: one concern per reason a node needs updating.
+	// Routine updates and stale package lists add none (design 5.3).
+	recent := snapshot.Summary.RecentChanges
+	if recent == nil {
+		recent = make([]string, 0)
+	}
+	if p := snapshot.Packages; p != nil {
+		concerns = append(concerns, p.NeedsUpdateReasons...)
+		score -= p.ScorePenalty
+		if p.LastUpgrade != nil {
+			if age := snapshot.Timestamp.Sub(*p.LastUpgrade); age >= 0 && age < 24*time.Hour {
+				recent = append(recent, fmt.Sprintf("System package update completed %s ago", shortAge(age)))
+			}
+		}
+	}
+	if score < 0 {
+		score = 0
+	}
+
 	// Determine health status
 	health := "healthy"
 	if score < 50 {
@@ -188,6 +211,15 @@ func (m *Manager) updateSummary(snapshot *types.SystemSnapshot) {
 	snapshot.Summary.Health = health
 	snapshot.Summary.Concerns = concerns
 	snapshot.Summary.Score = score
+	snapshot.Summary.RecentChanges = recent
+}
+
+// shortAge renders an age under a day as "45m" or "6h".
+func shortAge(d time.Duration) string {
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
+	return fmt.Sprintf("%dh", int(d.Hours()))
 }
 
 // formatUptime converts a duration to a human-readable uptime string

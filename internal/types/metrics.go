@@ -16,6 +16,7 @@ type SystemSnapshot struct {
 	Systemd   *SystemdMetrics `json:"systemd,omitempty"`
 	Logs      *LogSummary     `json:"logs,omitempty"`
 	Desktop   *DesktopMetrics `json:"desktop,omitempty"`
+	Packages  *PackageMetrics `json:"packages,omitempty"`
 }
 
 // Summary provides high-level health information
@@ -177,4 +178,49 @@ type GPUMetrics struct {
 	TemperatureC   int           `json:"temperature_c"`
 	PowerWatts     int           `json:"power_watts"`
 	Processes      []ProcessInfo `json:"processes,omitempty"`
+}
+
+// PackageMetrics reports how up to date the node is, from its own package
+// manager. Pointer fields are nil when the value is unknown; unknown is never
+// reported as zero or false.
+type PackageMetrics struct {
+	Manager                string          `json:"manager"` // apt, pacman, unknown
+	Method                 string          `json:"method,omitempty"`
+	State                  string          `json:"state"`  // up_to_date, updates_pending, security_updates_pending, reboot_required, overdue, unknown
+	Status                 string          `json:"status"` // ok, pending, stale, error, unsupported
+	NeedsUpdate            bool            `json:"needs_update"`
+	NeedsUpdateReasons     []string        `json:"needs_update_reasons,omitempty"`
+	UpdatesPending         *int            `json:"updates_pending"`
+	SecurityUpdatesPending *int            `json:"security_updates_pending"`
+	VulnerableUnfixed      *int            `json:"vulnerable_unfixed,omitempty"`
+	SecurityMaxSeverity    string          `json:"security_max_severity,omitempty"`
+	SecurityUpdates        []PackageUpdate `json:"security_updates,omitempty"`
+	RebootRequired         *bool           `json:"reboot_required"`
+	RebootReasons          []string        `json:"reboot_reasons,omitempty"`
+	RunningKernel          string          `json:"running_kernel,omitempty"`
+	MetadataAgeHours       *float64        `json:"metadata_age_hours"`
+	LastUpgrade            *time.Time      `json:"last_upgrade,omitempty"`
+	DaysSinceUpgrade       *int            `json:"days_since_upgrade,omitempty"`
+	OldestPendingDays      *int            `json:"oldest_pending_days,omitempty"`
+	UpdateInProgress       bool            `json:"update_in_progress"`
+	LastChecked            *time.Time      `json:"last_checked,omitempty"`
+	LastNetworkCheck       *time.Time      `json:"last_network_check,omitempty"`
+	CheckDurationMs        int64           `json:"check_duration_ms"`
+	Error                  string          `json:"error,omitempty"`
+	Interpretation         string          `json:"interpretation"`
+
+	// ScorePenalty is how many health-score points the summary should take
+	// off for this node's flags. It is computed from configuration and is
+	// not part of the JSON output.
+	ScorePenalty int `json:"-"`
+}
+
+// PackageUpdate names one package with a known security issue. Routine
+// updates are never listed by name.
+type PackageUpdate struct {
+	Name      string   `json:"name"`
+	Installed string   `json:"installed,omitempty"`
+	Available string   `json:"available,omitempty"` // empty when no fix is released yet
+	Severity  string   `json:"severity,omitempty"`  // arch-audit: critical, high, medium, low
+	Issues    []string `json:"issues,omitempty"`    // arch-audit: CVE / AVG ids
 }
