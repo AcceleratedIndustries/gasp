@@ -12,6 +12,7 @@
 - ✅ HTTP server with `/health`, `/metrics`, and `/version` endpoints
 - ✅ CPU metrics collection (load averages, utilization, trend analysis)
 - ✅ Memory metrics collection (usage, swap, pressure indicators)
+- ✅ Package update status for apt and pacman (pending and security updates, reboot needed, how long since the last upgrade)
 - ✅ Rich contextual interpretations for all metrics
 - ✅ Concurrent collector architecture
 - ✅ Health scoring and concern detection
@@ -210,6 +211,41 @@ Currently GASP uses command-line flags:
 ```
 
 Configuration file support is planned for Phase 2.
+
+### Package update status
+
+The `packages` block in `/metrics` says whether the node is up to date from its package manager's point of view. It supports apt (Debian, Ubuntu) and pacman (Arch and derivatives), runs unprivileged, and never changes package state: it does not run `apt-get update` or `pacman -Sy`.
+
+A node is flagged (`needs_update: true`, one entry in `summary.concerns` per reason) only for:
+
+- a pending security update (apt: an update from a `-security` suite; Arch: `arch-audit`, when installed),
+- a required reboot (a newer kernel installed than the one running, or `/run/reboot-required`),
+- age: updates pending and no upgrade for `overdue_after` (default 7 days on pacman, 30 days elsewhere), or a pending update waiting that long.
+
+Routine updates are counted but never flag a node. Unknown values are `null`, never `0`, and missing data never flags. Only packages with a known security issue are named; routine updates appear only as a count.
+
+Checks run in the background, so `/metrics` never waits for them. Local checks re-run when the package database changes, and at least hourly. On Arch, `checkupdates` and `arch-audit` also download fresh package and security data once a day at 03:30 local time (plus up to 30 minutes of random delay), into a private copy under GASP's state directory.
+
+```yaml
+collection:
+  packages:
+    enabled: true
+    refresh_interval: 1h
+    network_check_at: "03:30"
+    network_jitter: 30m
+    allow_network: true         # false: pacman -Qu only, no checkupdates or arch-audit
+    stale_after: 168h           # older package lists get a "may be out of date" note
+    overdue_after:
+      pacman: 168h
+      default: 720h
+    list_security_updates: true
+    max_listed: 20
+    score_penalty:              # best guess, to be tuned
+      security: 10
+      reboot: 5
+      overdue: 5
+    timeout: 60s
+```
 
 ### Localhost bypass and reverse proxies
 

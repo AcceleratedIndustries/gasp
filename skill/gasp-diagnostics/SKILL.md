@@ -119,6 +119,15 @@ These user messages should trigger this skill and active fetching:
 - `message_rate_per_min`: Spikes suggest logging storm or serious issue
 - Review `recent_errors[]` for specific problems
 
+### Package Updates
+
+- `packages.needs_update: true`: read `needs_update_reasons[]` (security update, reboot required, or overdue). Routine updates never set it
+- `state`: one word roll-up (`security_updates_pending`, `reboot_required`, `overdue`, `updates_pending`, `up_to_date`, `unknown`)
+- `security_updates[]`: the only packages GASP names; `vulnerable_unfixed` counts issues with no fix released yet
+- `null` counts mean unknown (for example pacman without `arch-audit`), never zero
+- `status: "stale"` or `"error"`: the last check failed; values are from `last_checked`
+- `update_in_progress: true`: an apt, dpkg or pacman run is under way; don't advise upgrading now
+
 ### Desktop Metrics (when present)
 
 - `gpu.utilization_pct` vs CPU: Identify GPU-bound vs CPU-bound workloads
