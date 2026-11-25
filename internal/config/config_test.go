@@ -362,3 +362,75 @@ func TestLoadConfig_ServerTimeouts(t *testing.T) {
 		t.Errorf("Expected 15s and 45s, got %v and %v", cfg.Server.ReadTimeout, cfg.Server.WriteTimeout)
 	}
 }
+
+func TestPackagesConfigDefaults(t *testing.T) {
+	s := PackagesConfig{}.Resolve()
+	if !s.Enabled || !s.AllowNetwork || !s.ListSecurityUpdates {
+		t.Errorf("defaults should enable everything: %+v", s)
+	}
+	if s.RefreshInterval != time.Hour || s.NetworkCheckHour != 3 || s.NetworkCheckMinute != 30 || s.NetworkJitter != 30*time.Minute {
+		t.Errorf("schedule defaults: %+v", s)
+	}
+	if s.OverdueFor("pacman") != 7*24*time.Hour || s.OverdueFor("apt") != 30*24*time.Hour {
+		t.Errorf("overdue: pacman %v apt %v", s.OverdueFor("pacman"), s.OverdueFor("apt"))
+	}
+	if s.PenaltySecurity != 10 || s.PenaltyReboot != 5 || s.PenaltyOverdue != 5 {
+		t.Errorf("penalties: %+v", s)
+	}
+}
+
+func TestPackagesConfigFromYAML(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	yaml := `collection:
+  packages:
+    network_check_at: "04:15"
+    network_jitter: 0s
+    allow_network: false
+    overdue_after:
+      pacman: 72h
+      Default: 480h
+    list_security_updates: false
+    score_penalty:
+      security: 25
+      overdue: 0
+`
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	s := cfg.Collection.Packages.Resolve()
+	if s.NetworkCheckHour != 4 || s.NetworkCheckMinute != 15 || s.NetworkJitter != 0 || s.AllowNetwork || s.ListSecurityUpdates {
+		t.Errorf("got %+v", s)
+	}
+	if s.OverdueFor("pacman") != 72*time.Hour || s.OverdueFor("apt") != 480*time.Hour {
+		t.Errorf("overdue: pacman %v apt %v", s.OverdueFor("pacman"), s.OverdueFor("apt"))
+	}
+	if s.PenaltySecurity != 25 || s.PenaltyReboot != 5 || s.PenaltyOverdue != 0 {
+		t.Errorf("penalties: %+v", s)
+	}
+}
+
+func TestPackagesConfigValidate(t *testing.T) {
+	neg := -time.Minute
+	bad := []PackagesConfig{
+		{NetworkCheckAt: "25:00"},
+		{NetworkCheckAt: "3am"},
+		{RefreshInterval: -time.Hour},
+		{NetworkJitter: &neg},
+		{OverdueAfter: map[string]time.Duration{"pacman": 0}},
+		{MaxListed: -1},
+		{ScorePenalty: ScorePenaltyConfig{Reboot: func() *int { n := 101; return &n }()}},
+	}
+	for i, p := range bad {
+		if err := p.validate(); err == nil {
+			t.Errorf("case %d (%+v) should fail validation", i, p)
+		}
+	}
+	if err := (PackagesConfig{NetworkCheckAt: "23:59"}).validate(); err != nil {
+		t.Errorf("valid config rejected: %v", err)
+	}
+}

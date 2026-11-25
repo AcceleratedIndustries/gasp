@@ -96,7 +96,189 @@ type FailedLoginConfig struct {
 }
 
 type CollectionConfig struct {
-	Interval time.Duration `yaml:"interval,omitempty"`
+	Interval time.Duration  `yaml:"interval,omitempty"`
+	Packages PackagesConfig `yaml:"packages,omitempty"`
+}
+
+// PackagesConfig controls package update reporting. Every field is optional;
+// see PackagesConfig.Resolve for the defaults.
+type PackagesConfig struct {
+	Enabled             *bool                    `yaml:"enabled,omitempty"`
+	RefreshInterval     time.Duration            `yaml:"refresh_interval,omitempty"`
+	NetworkCheckAt      string                   `yaml:"network_check_at,omitempty"` // HH:MM, local time
+	NetworkJitter       *time.Duration           `yaml:"network_jitter,omitempty"`
+	AllowNetwork        *bool                    `yaml:"allow_network,omitempty"`
+	StaleAfter          time.Duration            `yaml:"stale_after,omitempty"`
+	OverdueAfter        map[string]time.Duration `yaml:"overdue_after,omitempty"` // keyed by manager, plus "default"
+	ListSecurityUpdates *bool                    `yaml:"list_security_updates,omitempty"`
+	MaxListed           int                      `yaml:"max_listed,omitempty"`
+	Timeout             time.Duration            `yaml:"timeout,omitempty"`
+	ScorePenalty        ScorePenaltyConfig       `yaml:"score_penalty,omitempty"`
+}
+
+// ScorePenaltyConfig sets how many health-score points each package flag
+// costs. Unset fields use the defaults (10, 5, 5).
+type ScorePenaltyConfig struct {
+	Security *int `yaml:"security,omitempty"`
+	Reboot   *int `yaml:"reboot,omitempty"`
+	Overdue  *int `yaml:"overdue,omitempty"`
+}
+
+// PackageSettings is PackagesConfig with every default filled in.
+type PackageSettings struct {
+	Enabled             bool
+	RefreshInterval     time.Duration
+	NetworkCheckHour    int
+	NetworkCheckMinute  int
+	NetworkJitter       time.Duration
+	AllowNetwork        bool
+	StaleAfter          time.Duration
+	OverdueAfter        map[string]time.Duration
+	ListSecurityUpdates bool
+	MaxListed           int
+	Timeout             time.Duration
+	PenaltySecurity     int
+	PenaltyReboot       int
+	PenaltyOverdue      int
+}
+
+// Defaults for package update reporting.
+const (
+	DefaultPackagesRefreshInterval = time.Hour
+	DefaultPackagesNetworkCheckAt  = "03:30"
+	DefaultPackagesNetworkJitter   = 30 * time.Minute
+	DefaultPackagesStaleAfter      = 7 * 24 * time.Hour
+	DefaultPackagesMaxListed       = 20
+	DefaultPackagesTimeout         = 60 * time.Second
+	DefaultOverdueAfterPacman      = 7 * 24 * time.Hour
+	DefaultOverdueAfter            = 30 * 24 * time.Hour
+	DefaultPenaltySecurity         = 10
+	DefaultPenaltyReboot           = 5
+	DefaultPenaltyOverdue          = 5
+)
+
+// parseClock parses "HH:MM" (24-hour)
+func parseClock(s string) (int, int, error) {
+	t, err := time.Parse("15:04", s)
+	if err != nil {
+		return 0, 0, fmt.Errorf("want HH:MM (24-hour), got %q", s)
+	}
+	return t.Hour(), t.Minute(), nil
+}
+
+func boolOr(p *bool, def bool) bool {
+	if p == nil {
+		return def
+	}
+	return *p
+}
+
+func intOr(p *int, def int) int {
+	if p == nil {
+		return def
+	}
+	return *p
+}
+
+// Resolve fills in defaults. It assumes Validate has passed; an unparseable
+// network_check_at falls back to the default time.
+func (p PackagesConfig) Resolve() PackageSettings {
+	s := PackageSettings{
+		Enabled:             boolOr(p.Enabled, true),
+		RefreshInterval:     p.RefreshInterval,
+		AllowNetwork:        boolOr(p.AllowNetwork, true),
+		StaleAfter:          p.StaleAfter,
+		ListSecurityUpdates: boolOr(p.ListSecurityUpdates, true),
+		MaxListed:           p.MaxListed,
+		Timeout:             p.Timeout,
+		PenaltySecurity:     intOr(p.ScorePenalty.Security, DefaultPenaltySecurity),
+		PenaltyReboot:       intOr(p.ScorePenalty.Reboot, DefaultPenaltyReboot),
+		PenaltyOverdue:      intOr(p.ScorePenalty.Overdue, DefaultPenaltyOverdue),
+		OverdueAfter: map[string]time.Duration{
+			"pacman":  DefaultOverdueAfterPacman,
+			"default": DefaultOverdueAfter,
+		},
+	}
+	if s.RefreshInterval <= 0 {
+		s.RefreshInterval = DefaultPackagesRefreshInterval
+	}
+	if s.StaleAfter <= 0 {
+		s.StaleAfter = DefaultPackagesStaleAfter
+	}
+	if s.MaxListed <= 0 {
+		s.MaxListed = DefaultPackagesMaxListed
+	}
+	if s.Timeout <= 0 {
+		s.Timeout = DefaultPackagesTimeout
+	}
+	s.NetworkJitter = DefaultPackagesNetworkJitter
+	if p.NetworkJitter != nil {
+		s.NetworkJitter = *p.NetworkJitter
+	}
+	at := p.NetworkCheckAt
+	if at == "" {
+		at = DefaultPackagesNetworkCheckAt
+	}
+	h, m, err := parseClock(at)
+	if err != nil {
+		h, m, _ = parseClock(DefaultPackagesNetworkCheckAt)
+	}
+	s.NetworkCheckHour, s.NetworkCheckMinute = h, m
+	for k, v := range p.OverdueAfter {
+		if v > 0 {
+			s.OverdueAfter[strings.ToLower(k)] = v
+		}
+	}
+	return s
+}
+
+// OverdueFor returns the overdue threshold for a package manager.
+func (s PackageSettings) OverdueFor(manager string) time.Duration {
+	if d, ok := s.OverdueAfter[manager]; ok {
+		return d
+	}
+	if d, ok := s.OverdueAfter["default"]; ok {
+		return d
+	}
+	return DefaultOverdueAfter
+}
+
+func (p PackagesConfig) validate() error {
+	if p.NetworkCheckAt != "" {
+		if _, _, err := parseClock(p.NetworkCheckAt); err != nil {
+			return fmt.Errorf("invalid collection.packages.network_check_at: %w", err)
+		}
+	}
+	for name, d := range map[string]time.Duration{
+		"refresh_interval": p.RefreshInterval,
+		"stale_after":      p.StaleAfter,
+		"timeout":          p.Timeout,
+	} {
+		if d < 0 {
+			return fmt.Errorf("collection.packages.%s must not be negative", name)
+		}
+	}
+	if p.NetworkJitter != nil && *p.NetworkJitter < 0 {
+		return fmt.Errorf("collection.packages.network_jitter must not be negative")
+	}
+	for k, d := range p.OverdueAfter {
+		if d <= 0 {
+			return fmt.Errorf("collection.packages.overdue_after.%s must be positive", k)
+		}
+	}
+	if p.MaxListed < 0 {
+		return fmt.Errorf("collection.packages.max_listed must not be negative")
+	}
+	for name, v := range map[string]*int{
+		"security": p.ScorePenalty.Security,
+		"reboot":   p.ScorePenalty.Reboot,
+		"overdue":  p.ScorePenalty.Overdue,
+	} {
+		if v != nil && (*v < 0 || *v > 100) {
+			return fmt.Errorf("collection.packages.score_penalty.%s must be between 0 and 100", name)
+		}
+	}
+	return nil
 }
 
 type OutputConfig struct {
@@ -215,6 +397,10 @@ func (c *Config) Validate() error {
 		if d <= 0 {
 			return fmt.Errorf("rate_limiting.failed_login.%s must be positive", name)
 		}
+	}
+
+	if err := c.Collection.Packages.validate(); err != nil {
+		return err
 	}
 
 	return nil
