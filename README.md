@@ -226,6 +226,8 @@ Routine updates are counted but never flag a node. Unknown values are `null`, ne
 
 Checks run in the background, so `/metrics` never waits for them. Local checks re-run when the package database changes, and at least hourly. On Arch, `checkupdates` and `arch-audit` also download fresh package and security data once a day at 03:30 local time (plus up to 30 minutes of random delay), into a private copy under GASP's state directory.
 
+On Arch, install `pacman-contrib` and `fakeroot` (checkupdates needs both) and `arch-audit` for security status. Without checkupdates, GASP falls back to `pacman -Qu` against the system's package lists. If arch-audit's output can't be read (an unrecognized line), GASP keeps the last good result and logs why, rather than reporting no security issues. `make test-arch` runs the live checks against the real tools on an Arch machine.
+
 ```yaml
 collection:
   packages:

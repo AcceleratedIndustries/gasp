@@ -1,4 +1,4 @@
-.PHONY: build build-static build-all install clean test run fmt vet
+.PHONY: build build-static build-all install clean test test-arch run fmt vet
 
 BINARY_NAME=gasp
 VERSION?=$(shell git describe --tags --always --dirty 2>/dev/null || echo "0.1.0-dev")
@@ -36,6 +36,13 @@ install: build
 test:
 	@echo "Running tests..."
 	go test -v ./...
+
+# Live pacman/checkupdates/arch-audit tests. Run on an Arch machine with
+# pacman-contrib, fakeroot and arch-audit installed. Downloads package and
+# security data; changes no packages.
+test-arch:
+	@echo "Running live Arch package tests..."
+	go test -tags archlive -v -count=1 -run Live ./internal/collectors/
 
 run: build
 	@echo "Running $(BINARY_NAME)..."
