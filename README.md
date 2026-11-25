@@ -222,7 +222,7 @@ A node is flagged (`needs_update: true`, one entry in `summary.concerns` per rea
 - a required reboot (a newer kernel installed than the one running, or `/run/reboot-required`),
 - age: updates pending and no upgrade for `overdue_after` (default 7 days on pacman, 30 days elsewhere), or a pending update waiting that long.
 
-Routine updates are counted but never flag a node. Unknown values are `null`, never `0`, and missing data never flags. Only packages with a known security issue are named; routine updates appear only as a count.
+Routine updates are counted but never flag a node. On pacman, updates held back by `IgnorePkg`/`IgnoreGroup` are counted apart (`updates_ignored`), not as pending; a security fix among them is still flagged and listed with `ignored: true`. Unknown values are `null`, never `0`, and missing data never flags. Only packages with a known security issue are named; routine updates appear only as a count.
 
 Checks run in the background, so `/metrics` never waits for them. Local checks re-run when the package database changes, and at least hourly. On Arch, `checkupdates` and `arch-audit` also download fresh package and security data once a day at 03:30 local time (plus up to 30 minutes of random delay), into a private copy under GASP's state directory.
 

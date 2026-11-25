@@ -553,6 +553,10 @@ func evaluatePackages(f pkgFacts, s config.PackageSettings, now time.Time) types
 		m.LastChecked = &t
 		pending = len(r.Pending)
 		m.UpdatesPending = &pending
+		if r.IgnoredKnown {
+			ig := len(r.Ignored)
+			m.UpdatesIgnored = &ig
+		}
 		if r.SecurityKnown {
 			security = r.Security
 			n := len(security)
@@ -596,8 +600,15 @@ func evaluatePackages(f pkgFacts, s config.PackageSettings, now time.Time) types
 	securityFlag := m.SecurityUpdatesPending != nil && *m.SecurityUpdatesPending > 0
 	if securityFlag {
 		reason := plural(*m.SecurityUpdatesPending, "security update") + " pending"
+		var notes []string
 		if m.SecurityMaxSeverity != "" {
-			reason += " (max severity: " + m.SecurityMaxSeverity + ")"
+			notes = append(notes, "max severity: "+m.SecurityMaxSeverity)
+		}
+		if n := countIgnored(security); n > 0 {
+			notes = append(notes, fmt.Sprintf("%d held back by IgnorePkg", n))
+		}
+		if len(notes) > 0 {
+			reason += " (" + strings.Join(notes, ", ") + ")"
 		}
 		m.NeedsUpdateReasons = append(m.NeedsUpdateReasons, reason)
 		penalty += s.PenaltySecurity
@@ -663,27 +674,45 @@ func interpretPackages(m types.PackageMetrics, f pkgFacts, s config.PackageSetti
 		}
 	} else {
 		pending := *m.UpdatesPending
+		// Security updates among pending packages, and those held back by
+		// IgnorePkg, are described separately.
+		var secPending, secIgnored []types.PackageUpdate
+		for _, u := range m.SecurityUpdates {
+			if u.Ignored {
+				secIgnored = append(secIgnored, u)
+			} else {
+				secPending = append(secPending, u)
+			}
+		}
+		secIgnoredN := 0
+		if f.Result.SecurityKnown {
+			secIgnoredN = countIgnored(f.Result.Security)
+		}
+		secPendingN := 0
+		if m.SecurityUpdatesPending != nil {
+			secPendingN = *m.SecurityUpdatesPending - secIgnoredN
+		}
+		ignoredN := 0
+		if m.UpdatesIgnored != nil {
+			ignoredN = *m.UpdatesIgnored
+		}
 		switch {
+		case pending == 0 && ignoredN > 0:
+			parts = append(parts, "nothing pending outside IgnorePkg")
 		case pending == 0:
 			parts = append(parts, "up to date per local "+f.Manager+" database")
-		case m.SecurityUpdatesPending != nil && *m.SecurityUpdatesPending > 0:
-			p := fmt.Sprintf("%s pending, %d of them security", plural(pending, "update"), *m.SecurityUpdatesPending)
-			if len(m.SecurityUpdates) > 0 {
-				names := make([]string, 0, 3)
-				for i, u := range m.SecurityUpdates {
-					if i == 3 {
-						names = append(names, "...")
-						break
-					}
-					names = append(names, u.Name)
-				}
-				p += " (" + strings.Join(names, ", ") + ")"
-			}
-			parts = append(parts, p)
+		case secPendingN > 0:
+			parts = append(parts, fmt.Sprintf("%s pending, %d of them security", plural(pending, "update"), secPendingN)+nameList(secPending))
 		case m.SecurityUpdatesPending != nil:
 			parts = append(parts, plural(pending, "update")+" pending, none of them security")
 		default:
 			parts = append(parts, plural(pending, "update")+" pending")
+		}
+		if ignoredN > 0 {
+			parts = append(parts, plural(ignoredN, "update")+" held back by IgnorePkg, not counted as pending")
+		}
+		if secIgnoredN > 0 {
+			parts = append(parts, plural(secIgnoredN, "security update")+" held back by IgnorePkg"+nameList(secIgnored))
 		}
 		if m.SecurityUpdatesPending == nil {
 			if f.Manager == "pacman" {
@@ -721,6 +750,33 @@ func interpretPackages(m types.PackageMetrics, f pkgFacts, s config.PackageSetti
 		parts = append(parts, "a package manager is running")
 	}
 	return strings.Join(parts, "; ")
+}
+
+// countIgnored counts security updates held back by IgnorePkg.
+func countIgnored(list []types.PackageUpdate) int {
+	n := 0
+	for _, u := range list {
+		if u.Ignored {
+			n++
+		}
+	}
+	return n
+}
+
+// nameList returns " (a, b, c, ...)" for up to three names, or "".
+func nameList(list []types.PackageUpdate) string {
+	if len(list) == 0 {
+		return ""
+	}
+	names := make([]string, 0, 4)
+	for i, u := range list {
+		if i == 3 {
+			names = append(names, "...")
+			break
+		}
+		names = append(names, u.Name)
+	}
+	return " (" + strings.Join(names, ", ") + ")"
 }
 
 func copyPackageMetrics(m types.PackageMetrics) types.PackageMetrics {

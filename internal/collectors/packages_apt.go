@@ -34,6 +34,13 @@ type checkResult struct {
 	// Unfixed lists vulnerable packages with no fix released yet. Only
 	// arch-audit reports these; nil means unknown.
 	Unfixed []types.PackageUpdate
+	// Ignored lists updates held back by the package manager's own
+	// configuration (pacman IgnorePkg/IgnoreGroup). They are not pending:
+	// they never count toward updates_pending, first-seen age or the
+	// overdue rule. A security fix among them is still flagged.
+	// IgnoredKnown is false when the check could not tell.
+	Ignored      []pendingPackage
+	IgnoredKnown bool
 }
 
 // pkgBackend is one package manager.

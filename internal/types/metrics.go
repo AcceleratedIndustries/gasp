@@ -191,6 +191,7 @@ type PackageMetrics struct {
 	NeedsUpdate            bool            `json:"needs_update"`
 	NeedsUpdateReasons     []string        `json:"needs_update_reasons,omitempty"`
 	UpdatesPending         *int            `json:"updates_pending"`
+	UpdatesIgnored         *int            `json:"updates_ignored,omitempty"` // pacman IgnorePkg/IgnoreGroup; not in updates_pending
 	SecurityUpdatesPending *int            `json:"security_updates_pending"`
 	VulnerableUnfixed      *int            `json:"vulnerable_unfixed,omitempty"`
 	SecurityMaxSeverity    string          `json:"security_max_severity,omitempty"`
@@ -222,5 +223,6 @@ type PackageUpdate struct {
 	Installed string   `json:"installed,omitempty"`
 	Available string   `json:"available,omitempty"` // empty when no fix is released yet
 	Severity  string   `json:"severity,omitempty"`  // arch-audit: critical, high, medium, low
-	Issues    []string `json:"issues,omitempty"`    // arch-audit: CVE / AVG ids
+	Issues    []string `json:"issues,omitempty"`    // arch-audit: CVE ids (issue types when none)
+	Ignored   bool     `json:"ignored,omitempty"`   // held back by pacman IgnorePkg/IgnoreGroup
 }

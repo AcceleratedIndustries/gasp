@@ -124,6 +124,7 @@ These user messages should trigger this skill and active fetching:
 - `packages.needs_update: true`: read `needs_update_reasons[]` (security update, reboot required, or overdue). Routine updates never set it
 - `state`: one word roll-up (`security_updates_pending`, `reboot_required`, `overdue`, `updates_pending`, `up_to_date`, `unknown`)
 - `security_updates[]`: the only packages GASP names; `vulnerable_unfixed` counts issues with no fix released yet
+- `updates_ignored` (pacman): updates held back by IgnorePkg/IgnoreGroup. Not part of `updates_pending` and never flagged on their own, but an ignored package with a security fix is flagged and appears in `security_updates[]` with `ignored: true`
 - `null` counts mean unknown (for example pacman without `arch-audit`), never zero
 - `status: "stale"` or `"error"`: the last check failed; values are from `last_checked`
 - `update_in_progress: true`: an apt, dpkg or pacman run is under way; don't advise upgrading now

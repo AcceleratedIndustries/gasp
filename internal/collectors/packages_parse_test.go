@@ -74,10 +74,13 @@ func TestParseAptHistory(t *testing.T) {
 }
 
 func TestParsePacmanUpdates(t *testing.T) {
-	pending := parsePacmanUpdates(readFixture(t, "pacman-qu.txt"))
-	// vim is in IgnorePkg: skipped, as checkupdates does.
+	pending, ignored := parsePacmanUpdates(readFixture(t, "pacman-qu.txt"))
+	// vim is in IgnorePkg: listed apart, not as pending.
 	if len(pending) != 2 || pending[1].Name != "openssl" {
 		t.Fatalf("pending = %+v", pending)
+	}
+	if len(ignored) != 1 || ignored[0].Name != "vim" || ignored[0].Available != "9.1.0900-1" {
+		t.Errorf("ignored = %+v", ignored)
 	}
 	if pending[0].Installed != "6.12.4.arch1-1" {
 		t.Errorf("linux installed = %q", pending[0].Installed)

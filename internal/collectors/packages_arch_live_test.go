@@ -282,15 +282,31 @@ func TestLiveCheckupdates(t *testing.T) {
 	// lines pacman prints, minus [ignored] ones.
 	qu := liveRun(t, nil, "pacman", "-Qu")
 	logOutput(t, "pacman -Qu", qu)
-	wantQu := 0
+	wantQu, wantIgnored := 0, 0
 	for _, line := range strings.Split(string(qu.Stdout), "\n") {
-		if strings.Contains(line, " -> ") && !strings.Contains(line, "[ignored]") {
+		switch {
+		case strings.Contains(line, " -> ") && strings.Contains(line, "[ignored]"):
+			wantIgnored++
+		case strings.Contains(line, " -> "):
 			wantQu++
 		}
 	}
-	if got := len(parsePacmanUpdates(qu.Stdout)); got != wantQu {
-		t.Errorf("pacman -Qu: parsed %d, want %d", got, wantQu)
+	gotQu, gotIgnored := parsePacmanUpdates(qu.Stdout)
+	if len(gotQu) != wantQu || len(gotIgnored) != wantIgnored {
+		t.Errorf("pacman -Qu: parsed %d pending and %d ignored, want %d and %d", len(gotQu), len(gotIgnored), wantQu, wantIgnored)
 	}
+
+	// Ignored updates against the private copy, which checkupdates hides.
+	quDB := liveRun(t, nil, "pacman", "-Qu", "--dbpath", dbDir)
+	logOutput(t, "pacman -Qu --dbpath <checkup-db>", quDB)
+	_, wantNetIgnored := parsePacmanUpdates(quDB.Stdout)
+	if !net.IgnoredKnown || len(net.Ignored) != len(wantNetIgnored) {
+		t.Errorf("network check ignored=%d known=%v, pacman -Qu --dbpath lists %d [ignored]", len(net.Ignored), net.IgnoredKnown, len(wantNetIgnored))
+	}
+	if !local.IgnoredKnown || len(local.Ignored) != len(wantNetIgnored) {
+		t.Errorf("local check ignored=%d known=%v, want %d", len(local.Ignored), local.IgnoredKnown, len(wantNetIgnored))
+	}
+	t.Logf("ignored by IgnorePkg/IgnoreGroup: %d", len(net.Ignored))
 
 	// A pending package with a known fix is marked as a security update.
 	if len(net.Pending) == 0 {

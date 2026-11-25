@@ -86,6 +86,7 @@ func (p *pacmanBackend) NetworkCheck(ctx context.Context) (checkResult, error) {
 		return checkResult{}, err
 	}
 	out := checkResult{Method: "checkupdates", Pending: pending}
+	p.addIgnored(ctx, &out)
 	p.audit(ctx)
 	p.applySecurity(&out)
 	return out, nil
@@ -102,6 +103,7 @@ func (p *pacmanBackend) LocalCheck(ctx context.Context) (checkResult, error) {
 			if err == nil {
 				if pending, perr := checkupdatesResult(res); perr == nil {
 					out := checkResult{Method: "checkupdates --nosync", Pending: pending}
+					p.addIgnored(ctx, &out)
 					p.applySecurity(&out)
 					return out, nil
 				}
@@ -119,7 +121,8 @@ func (p *pacmanBackend) LocalCheck(ctx context.Context) (checkResult, error) {
 	if res.ExitCode != 0 && !(res.ExitCode == 1 && len(bytes.TrimSpace(res.Stdout)) == 0) {
 		return checkResult{}, fmt.Errorf("pacman -Qu exited %d: %s", res.ExitCode, firstLine(res.Stderr))
 	}
-	out := checkResult{Method: "pacman -Qu", Pending: parsePacmanUpdates(res.Stdout)}
+	pending, ignored := parsePacmanUpdates(res.Stdout)
+	out := checkResult{Method: "pacman -Qu", Pending: pending, Ignored: ignored, IgnoredKnown: true}
 	// arch-audit downloads the security tracker, so it only runs in the
 	// network check. Its last findings still apply here.
 	p.applySecurity(&out)
@@ -131,7 +134,8 @@ func (p *pacmanBackend) LocalCheck(ctx context.Context) (checkResult, error) {
 func checkupdatesResult(res cmdResult) ([]pendingPackage, error) {
 	switch res.ExitCode {
 	case 0:
-		return parsePacmanUpdates(res.Stdout), nil
+		pending, _ := parsePacmanUpdates(res.Stdout)
+		return pending, nil
 	case 2:
 		return nil, nil
 	default:
@@ -145,22 +149,52 @@ func checkupdatesResult(res cmdResult) ([]pendingPackage, error) {
 
 // pacmanUpdateLine matches "name old -> new", the format of both
 // checkupdates and pacman -Qu. pacman -Qu appends " [ignored]" to packages
-// in IgnorePkg/IgnoreGroup; those are skipped, as checkupdates does, so the
-// count does not change when GASP falls back to pacman -Qu.
+// in IgnorePkg/IgnoreGroup; checkupdates leaves those lines out.
 var pacmanUpdateLine = regexp.MustCompile(`^(\S+) (\S+) -> (\S+)(.*)$`)
 
-func parsePacmanUpdates(out []byte) []pendingPackage {
-	var pending []pendingPackage
+// parsePacmanUpdates splits pacman -Qu or checkupdates output into pending
+// updates and ignored ones.
+func parsePacmanUpdates(out []byte) (pending, ignored []pendingPackage) {
 	sc := bufio.NewScanner(bytes.NewReader(out))
 	for sc.Scan() {
-		if m := pacmanUpdateLine.FindStringSubmatch(strings.TrimSpace(sc.Text())); m != nil {
-			if strings.Contains(m[4], "[ignored]") {
-				continue
-			}
-			pending = append(pending, pendingPackage{Name: m[1], Installed: m[2], Available: m[3]})
+		m := pacmanUpdateLine.FindStringSubmatch(strings.TrimSpace(sc.Text()))
+		if m == nil {
+			continue
+		}
+		pkg := pendingPackage{Name: m[1], Installed: m[2], Available: m[3]}
+		if strings.Contains(m[4], "[ignored]") {
+			ignored = append(ignored, pkg)
+		} else {
+			pending = append(pending, pkg)
 		}
 	}
-	return pending
+	return pending, ignored
+}
+
+// addIgnored lists the updates IgnorePkg/IgnoreGroup hold back, which
+// checkupdates leaves out, by running pacman -Qu against the same database
+// copy checkupdates used. pacman -Qu only reads. On failure the ignored
+// count stays unknown and nothing else changes.
+func (p *pacmanBackend) addIgnored(ctx context.Context, out *checkResult) {
+	db := p.dbDir
+	if db == "" {
+		// checkupdates' own default.
+		tmp := os.Getenv("TMPDIR")
+		if tmp == "" {
+			tmp = "/tmp"
+		}
+		db = filepath.Join(tmp, fmt.Sprintf("checkup-db-%d", os.Getuid()))
+	}
+	res, err := p.runner.Run(ctx, nil, "pacman", "-Qu", "--dbpath", db)
+	if err != nil {
+		return
+	}
+	// pacman -Qu exits 1 with no output when nothing is out of date.
+	if res.ExitCode != 0 && !(res.ExitCode == 1 && len(bytes.TrimSpace(res.Stdout)) == 0) {
+		return
+	}
+	_, out.Ignored = parsePacmanUpdates(res.Stdout)
+	out.IgnoredKnown = true
 }
 
 // archAuditFormat asks arch-audit for one tab-separated line per affected
@@ -260,7 +294,8 @@ func (p *pacmanBackend) restoreAudit(a *auditState) {
 	p.securityKnown = true
 }
 
-// applySecurity marks pending packages that fix a known security issue.
+// applySecurity marks pending (and ignored) packages that fix a known
+// security issue.
 // Fixed findings count only while the package is still pending, so a
 // finding goes away as soon as the package is upgraded.
 func (p *pacmanBackend) applySecurity(out *checkResult) {
@@ -272,17 +307,24 @@ func (p *pacmanBackend) applySecurity(out *checkResult) {
 	for _, s := range p.lastSecurity {
 		byName[s.Name] = s
 	}
-	for i := range out.Pending {
-		pend := &out.Pending[i]
-		s, ok := byName[pend.Name]
-		if !ok {
-			continue
+	mark := func(list []pendingPackage, ignored bool) {
+		for i := range list {
+			pend := &list[i]
+			s, ok := byName[pend.Name]
+			if !ok {
+				continue
+			}
+			pend.Security = true
+			s.Installed = pend.Installed
+			s.Available = pend.Available
+			s.Ignored = ignored
+			out.Security = append(out.Security, s)
 		}
-		pend.Security = true
-		s.Installed = pend.Installed
-		s.Available = pend.Available
-		out.Security = append(out.Security, s)
 	}
+	mark(out.Pending, false)
+	// An ignored package with a released security fix is still flagged:
+	// IgnorePkg holds the upgrade back, it does not make the system safe.
+	mark(out.Ignored, true)
 	out.Unfixed = append([]types.PackageUpdate{}, p.lastUnfixed...)
 	out.Method += " + arch-audit"
 }

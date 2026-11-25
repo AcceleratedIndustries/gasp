@@ -451,6 +451,91 @@ func TestPacmanArchAuditUnreadableOutput(t *testing.T) {
 	}
 }
 
+// Updates held back by IgnorePkg are counted apart and never as pending,
+// but a security fix among them is still flagged.
+func TestPacmanIgnoredPackages(t *testing.T) {
+	root := archRoot(t)
+	stateDir := t.TempDir()
+	dbDir := filepath.Join(stateDir, "checkup-db")
+	r := newFakeRunner("pacman", "checkupdates", "arch-audit")
+	setupPacman(r)
+	r.set("pacman -Qu --dbpath "+dbDir, cmdResult{Stdout: []byte("openssl 3.4.0-1 -> 3.4.1-1\nvim 9.1.0866-1 -> 9.1.0900-1 [ignored]\nlinux-lts 6.6.60-1 -> 6.6.63-1 [ignored]\n")}, nil)
+	audit := string(readFixture(t, "arch-audit-format.txt")) + "vim\tHigh risk\t9.1.0900-1\tCVE-2026-5555\tarbitrary code execution\n"
+	r.set("arch-audit --format "+archAuditFormat, cmdResult{Stdout: []byte(audit)}, nil)
+	clock := &fakeClock{t: time.Date(2026, 11, 25, 12, 0, 0, 0, time.Local)}
+
+	c := newTestCollector(t, root, r, clock, stateDir)
+	c.refresh(context.Background(), true)
+	m := collectPkgs(t, c)
+	if *m.UpdatesPending != 3 || m.UpdatesIgnored == nil || *m.UpdatesIgnored != 2 {
+		t.Fatalf("pending=%v ignored=%v, want 3 and 2", m.UpdatesPending, m.UpdatesIgnored)
+	}
+	if *m.SecurityUpdatesPending != 3 || m.State != "security_updates_pending" {
+		t.Fatalf("security=%d state=%s, want openssl, glibc and the ignored vim", *m.SecurityUpdatesPending, m.State)
+	}
+	var vim *types.PackageUpdate
+	for i := range m.SecurityUpdates {
+		if m.SecurityUpdates[i].Name == "vim" {
+			vim = &m.SecurityUpdates[i]
+		}
+	}
+	if vim == nil || !vim.Ignored || vim.Available != "9.1.0900-1" {
+		t.Errorf("vim = %+v", vim)
+	}
+	for _, u := range m.SecurityUpdates {
+		if u.Name != "vim" && u.Ignored {
+			t.Errorf("%s marked ignored", u.Name)
+		}
+	}
+	if len(m.NeedsUpdateReasons) == 0 || !strings.Contains(m.NeedsUpdateReasons[0], "1 held back by IgnorePkg") {
+		t.Errorf("reasons = %v", m.NeedsUpdateReasons)
+	}
+	for _, want := range []string{"3 updates pending, 2 of them security (", "2 updates held back by IgnorePkg, not counted as pending", "1 security update held back by IgnorePkg (vim)"} {
+		if !strings.Contains(m.Interpretation, want) {
+			t.Errorf("interpretation %q lacks %q", m.Interpretation, want)
+		}
+	}
+	for k := range c.state.FirstSeen {
+		if strings.HasPrefix(k, "vim@") || strings.HasPrefix(k, "linux-lts@") {
+			t.Errorf("ignored package tracked for age: %s", k)
+		}
+	}
+}
+
+// Without security data, ignored updates are only a count: nothing pending,
+// nothing flagged for them.
+func TestPacmanIgnoredOnlyLocal(t *testing.T) {
+	root := archRoot(t)
+	r := newFakeRunner("pacman")
+	r.set("pacman -Qu", cmdResult{Stdout: []byte("vim 9.1.0866-1 -> 9.1.0900-1 [ignored]\n")}, nil)
+	c := newTestCollector(t, root, r, &fakeClock{t: rollupNow}, "")
+	c.refresh(context.Background(), true)
+	m := collectPkgs(t, c)
+	if *m.UpdatesPending != 0 || m.UpdatesIgnored == nil || *m.UpdatesIgnored != 1 {
+		t.Fatalf("pending=%v ignored=%v", m.UpdatesPending, m.UpdatesIgnored)
+	}
+	if m.State == "updates_pending" || m.OldestPendingDays != nil {
+		t.Errorf("state=%s oldest=%v: ignored updates must not count as pending", m.State, m.OldestPendingDays)
+	}
+	if !strings.Contains(m.Interpretation, "nothing pending outside IgnorePkg") {
+		t.Errorf("interpretation = %q", m.Interpretation)
+	}
+}
+
+// When pacman -Qu --dbpath fails, the ignored count is unknown, not zero.
+func TestPacmanIgnoredUnknown(t *testing.T) {
+	r := newFakeRunner("pacman", "checkupdates")
+	setupPacman(r) // no response for pacman -Qu --dbpath: the fake exits 127
+	p := &pacmanBackend{runner: r, dbDir: filepath.Join(t.TempDir(), "checkup-db")}
+	out, err := p.NetworkCheck(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.IgnoredKnown || out.Ignored != nil || len(out.Pending) != 3 {
+		t.Errorf("ignored known=%v %+v pending=%d", out.IgnoredKnown, out.Ignored, len(out.Pending))
+	}
+}
+
 func TestPacmanWithoutArchAuditOrNetwork(t *testing.T) {
 	root := archRoot(t)
 	r := newFakeRunner("pacman")
