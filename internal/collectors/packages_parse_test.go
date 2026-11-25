@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/accelerated-industries/gasp/internal/types"
 )
 
 func readFixture(t *testing.T, name string) []byte {
@@ -73,11 +75,9 @@ func TestParseAptHistory(t *testing.T) {
 
 func TestParsePacmanUpdates(t *testing.T) {
 	pending := parsePacmanUpdates(readFixture(t, "pacman-qu.txt"))
-	if len(pending) != 3 {
+	// vim is in IgnorePkg: skipped, as checkupdates does.
+	if len(pending) != 2 || pending[1].Name != "openssl" {
 		t.Fatalf("pending = %+v", pending)
-	}
-	if pending[2].Name != "vim" || pending[2].Available != "9.1.0900-1" {
-		t.Errorf("ignored package parsed as %+v", pending[2])
 	}
 	if pending[0].Installed != "6.12.4.arch1-1" {
 		t.Errorf("linux installed = %q", pending[0].Installed)
@@ -96,24 +96,113 @@ func TestCheckupdatesResult(t *testing.T) {
 	}
 }
 
-func TestParseArchAudit(t *testing.T) {
-	fixable, unfixed := parseArchAudit(readFixture(t, "arch-audit.txt"))
-	if len(fixable) != 2 || len(unfixed) != 2 {
-		t.Fatalf("fixable = %+v\nunfixed = %+v", fixable, unfixed)
+// The arch-audit fixtures follow the output code in arch-audit's source
+// (print_affected_colored and print_affected_formatted in src/main.rs,
+// v0.1.20). Replace them with output captured on a real Arch machine; the
+// archlive tests print it.
+
+func TestParseArchAuditFormat(t *testing.T) {
+	fixable, unfixed, ok := parseArchAuditFormat(readFixture(t, "arch-audit-format.txt"))
+	if !ok || len(fixable) != 2 || len(unfixed) != 2 {
+		t.Fatalf("ok=%v\nfixable = %+v\nunfixed = %+v", ok, fixable, unfixed)
 	}
-	if fixable[0].Name != "openssl" || fixable[0].Severity != "high" || fixable[0].Available != "3.4.1-1" || len(fixable[0].Issues) != 2 {
-		t.Errorf("openssl = %+v", fixable[0])
+	if fixable[0].Name != "glibc" || fixable[0].Severity != "critical" || fixable[0].Available != "2.40-2" {
+		t.Errorf("glibc = %+v", fixable[0])
 	}
-	if fixable[1].Name != "glibc" || fixable[1].Severity != "critical" {
-		t.Errorf("glibc = %+v", fixable[1])
+	if o := fixable[1]; o.Name != "openssl" || o.Severity != "high" || o.Available != "3.4.1-1" || len(o.Issues) != 2 || o.Issues[1] != "CVE-2026-1235" {
+		t.Errorf("openssl = %+v", o)
 	}
-	// A fix only in testing is not a fix a normal system can install.
-	names := map[string]bool{}
-	for _, u := range unfixed {
-		names[u.Name] = true
+	if unfixed[0].Name != "curl" || unfixed[0].Available != "" || unfixed[1].Name != "libxml2" || unfixed[1].Severity != "low" {
+		t.Errorf("unfixed = %+v", unfixed)
 	}
-	if !names["curl"] || !names["libxml2"] {
-		t.Errorf("unfixed = %+v, want curl (testing only) and libxml2", unfixed)
+}
+
+func TestParseArchAuditFormatEdgeCases(t *testing.T) {
+	if f, u, ok := parseArchAuditFormat(nil); !ok || len(f)+len(u) != 0 || f == nil || u == nil {
+		t.Errorf("empty output should be a clean result with empty lists: %v %v %v", f, u, ok)
+	}
+	// No CVEs: the issue types stand in.
+	f, _, ok := parseArchAuditFormat([]byte("zlib\tUnknown risk\t1.3-2\t\tdenial of service\n"))
+	if !ok || len(f) != 1 || f[0].Severity != "unknown" || f[0].Issues[0] != "denial of service" {
+		t.Errorf("zlib = %+v ok=%v", f, ok)
+	}
+	for _, bad := range []string{
+		"openssl is affected by arbitrary code execution. High risk!", // sentence output
+		"openssl\tHigh risk\t3.4.1-1",                                 // too few fields
+		"openssl\tHigh\t3.4.1-1\t\t",                                  // severity without "risk"
+		"openssl\tSevere risk\t3.4.1-1\t\t",                           // unknown severity
+	} {
+		if _, _, ok := parseArchAuditFormat([]byte("glibc\tCritical risk\t2.40-2\t\t\n" + bad + "\n")); ok {
+			t.Errorf("accepted %q", bad)
+		}
+	}
+}
+
+func TestParseArchAuditText(t *testing.T) {
+	fixable, unfixed, ok := parseArchAuditText(readFixture(t, "arch-audit.txt"))
+	if !ok || len(fixable) != 2 || len(unfixed) != 2 {
+		t.Fatalf("ok=%v\nfixable = %+v\nunfixed = %+v", ok, fixable, unfixed)
+	}
+	if o := fixable[1]; o.Name != "openssl" || o.Severity != "high" || o.Available != "3.4.1-1" || len(o.Issues) != 2 || o.Issues[0] != "arbitrary code execution" {
+		t.Errorf("openssl = %+v", o)
+	}
+	if fixable[0].Name != "glibc" || fixable[0].Severity != "critical" || fixable[0].Available != "2.40-2" {
+		t.Errorf("glibc = %+v", fixable[0])
+	}
+	if unfixed[0].Name != "curl" || unfixed[1].Name != "libxml2" {
+		t.Errorf("unfixed = %+v", unfixed)
+	}
+}
+
+func TestParseArchAuditTextVariants(t *testing.T) {
+	cases := []struct {
+		line     string
+		name     string
+		fixed    string // "" means unfixed
+		severity string
+		issue0   string
+	}{
+		// Old arch-audit: "Package " prefix, CVEs as issues, "Update to X!".
+		{"Package openssl is affected by CVE-2017-3735, CVE-2017-3736. Medium risk! Update to 1.1.0g-1!", "openssl", "1.1.0g-1", "medium", "CVE-2017-3735"},
+		{"Package jasper is affected by CVE-2016-8886. Medium risk!", "jasper", "", "medium", "CVE-2016-8886"},
+		// -c adds the CVE clause; the CVEs become the issues.
+		{"curl is affected by denial of service. (CVE-2026-2222, CVE-2026-2223). Medium risk! Update to at least 8.11.1-1!", "curl", "8.11.1-1", "medium", "CVE-2026-2222"},
+		// --show-testing: a testing-only fix is not a fix for a normal system.
+		{"curl is affected by denial of service. Medium risk! Update to at least 8.11.1-1 from the testing repos!", "curl", "", "medium", "denial of service"},
+		// -r adds the required-by clause.
+		{"libpng is affected by arbitrary code execution. It's required by gtk3, qt6-base. High risk! Update to at least 1.6.44-1!", "libpng", "1.6.44-1", "high", "arbitrary code execution"},
+		{"foo is affected by unknown. Unknown risk!", "foo", "", "unknown", "unknown"},
+		{"bar is affected by privilege escalation. Critical risk! Update to at least 1:2.3-4!", "bar", "1:2.3-4", "critical", "privilege escalation"},
+	}
+	for _, c := range cases {
+		fixable, unfixed, ok := parseArchAuditText([]byte(c.line + "\n"))
+		if !ok || len(fixable)+len(unfixed) != 1 {
+			t.Errorf("%q: ok=%v fixable=%+v unfixed=%+v", c.line, ok, fixable, unfixed)
+			continue
+		}
+		var u types.PackageUpdate
+		if c.fixed != "" {
+			if len(fixable) != 1 {
+				t.Errorf("%q: want fixable, got unfixed %+v", c.line, unfixed)
+				continue
+			}
+			u = fixable[0]
+		} else {
+			if len(unfixed) != 1 {
+				t.Errorf("%q: want unfixed, got fixable %+v", c.line, fixable)
+				continue
+			}
+			u = unfixed[0]
+		}
+		if u.Name != c.name || u.Available != c.fixed || u.Severity != c.severity || len(u.Issues) == 0 || u.Issues[0] != c.issue0 {
+			t.Errorf("%q: got %+v", c.line, u)
+		}
+	}
+	if _, _, ok := parseArchAuditText([]byte("openssl is affected by arbitrary code execution. High risk!\nwarning: something new\n")); ok {
+		t.Error("an unrecognized line must make the whole result untrusted")
+	}
+	if f, u, ok := parseArchAuditText([]byte("\n")); !ok || len(f)+len(u) != 0 {
+		t.Error("empty output should be a clean result")
 	}
 }
 

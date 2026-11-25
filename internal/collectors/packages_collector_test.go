@@ -356,7 +356,7 @@ func TestPacmanNetworkCheckWithArchAudit(t *testing.T) {
 	r := newFakeRunner("pacman", "checkupdates", "arch-audit")
 	setupPacman(r)
 	dbDir := filepath.Join(stateDir, "checkup-db")
-	r.set("arch-audit --dbpath "+dbDir, cmdResult{Stdout: readFixture(t, "arch-audit.txt")}, nil)
+	r.set("arch-audit --format "+archAuditFormat, cmdResult{Stdout: readFixture(t, "arch-audit-format.txt")}, nil)
 	clock := &fakeClock{t: time.Date(2026, 11, 25, 12, 0, 0, 0, time.Local)}
 
 	c := newTestCollector(t, root, r, clock, stateDir)
@@ -404,6 +404,50 @@ func TestPacmanNetworkCheckWithArchAudit(t *testing.T) {
 	}
 	if m.SecurityUpdatesPending == nil || *m.SecurityUpdatesPending != 1 {
 		t.Fatalf("audit findings lost on restart: %v", m.SecurityUpdatesPending)
+	}
+}
+
+// An arch-audit without --format exits with a usage error; GASP falls back
+// to the sentence output.
+func TestPacmanArchAuditFallsBackToText(t *testing.T) {
+	r := newFakeRunner("pacman", "checkupdates", "arch-audit")
+	setupPacman(r)
+	r.set("arch-audit --format "+archAuditFormat, cmdResult{ExitCode: 1, Stderr: []byte("error: Found argument '--format' which wasn't expected")}, nil)
+	r.set("arch-audit", cmdResult{Stdout: readFixture(t, "arch-audit.txt")}, nil)
+	p := &pacmanBackend{runner: r}
+	out, err := p.NetworkCheck(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !out.SecurityKnown || len(out.Security) != 2 || len(out.Unfixed) != 2 {
+		t.Fatalf("security=%+v unfixed=%+v known=%v", out.Security, out.Unfixed, out.SecurityKnown)
+	}
+}
+
+// Output GASP cannot read must not turn into "no security issues".
+func TestPacmanArchAuditUnreadableOutput(t *testing.T) {
+	r := newFakeRunner("pacman", "checkupdates", "arch-audit")
+	setupPacman(r)
+	garbled := cmdResult{Stdout: []byte("Some new format nobody told GASP about\n")}
+	r.set("arch-audit --format "+archAuditFormat, garbled, nil)
+	r.set("arch-audit", garbled, nil)
+	p := &pacmanBackend{runner: r}
+	out, err := p.NetworkCheck(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.SecurityKnown || out.Security != nil {
+		t.Fatalf("unreadable output reported as known: %+v", out)
+	}
+
+	// With findings from an earlier run, a later unreadable run keeps them.
+	r.set("arch-audit --format "+archAuditFormat, cmdResult{Stdout: readFixture(t, "arch-audit-format.txt")}, nil)
+	if out, _ = p.NetworkCheck(context.Background()); len(out.Security) != 2 {
+		t.Fatalf("first audit: %+v", out.Security)
+	}
+	r.set("arch-audit --format "+archAuditFormat, garbled, nil)
+	if out, _ = p.NetworkCheck(context.Background()); !out.SecurityKnown || len(out.Security) != 2 {
+		t.Fatalf("previous findings lost: %+v", out.Security)
 	}
 }
 

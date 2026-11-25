@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -20,7 +21,7 @@ import (
 // The network check runs checkupdates, which syncs a private copy of the
 // sync databases (CHECKUPDATES_DB) and never touches /var/lib/pacman/sync,
 // so it is safe as a normal user and cannot cause a partial upgrade. When
-// arch-audit is installed it runs against that same private copy.
+// arch-audit is installed it runs right after, in the same daily check.
 //
 // Between network checks, the local check compares installed packages with
 // whatever the system's own sync databases hold.
@@ -85,7 +86,7 @@ func (p *pacmanBackend) NetworkCheck(ctx context.Context) (checkResult, error) {
 		return checkResult{}, err
 	}
 	out := checkResult{Method: "checkupdates", Pending: pending}
-	p.audit(ctx, true)
+	p.audit(ctx)
 	p.applySecurity(&out)
 	return out, nil
 }
@@ -143,51 +144,98 @@ func checkupdatesResult(res cmdResult) ([]pendingPackage, error) {
 }
 
 // pacmanUpdateLine matches "name old -> new", the format of both
-// checkupdates and pacman -Qu. pacman may append " [ignored]".
-var pacmanUpdateLine = regexp.MustCompile(`^(\S+) (\S+) -> (\S+)`)
+// checkupdates and pacman -Qu. pacman -Qu appends " [ignored]" to packages
+// in IgnorePkg/IgnoreGroup; those are skipped, as checkupdates does, so the
+// count does not change when GASP falls back to pacman -Qu.
+var pacmanUpdateLine = regexp.MustCompile(`^(\S+) (\S+) -> (\S+)(.*)$`)
 
 func parsePacmanUpdates(out []byte) []pendingPackage {
 	var pending []pendingPackage
 	sc := bufio.NewScanner(bytes.NewReader(out))
 	for sc.Scan() {
 		if m := pacmanUpdateLine.FindStringSubmatch(strings.TrimSpace(sc.Text())); m != nil {
+			if strings.Contains(m[4], "[ignored]") {
+				continue
+			}
 			pending = append(pending, pendingPackage{Name: m[1], Installed: m[2], Available: m[3]})
 		}
 	}
 	return pending
 }
 
+// archAuditFormat asks arch-audit for one tab-separated line per affected
+// package: name, severity ("High risk"), the fixed version (printed only
+// when a released fix exists, so empty for "no fix yet" and for fixes that
+// are only in the testing repos), CVE ids, and issue types.
+const archAuditFormat = "%n\t%s\t%v\t%c\t%t"
+
 // audit runs arch-audit and stores its findings. arch-audit downloads the
 // Arch security tracker's issue list, so this runs only in the network
-// check. useDB points it at the private database copy; if that run fails it
-// retries with the defaults. A failed audit leaves the previous findings in
-// place.
-func (p *pacmanBackend) audit(ctx context.Context, useDB bool) {
+// check.
+//
+// It asks for archAuditFormat first, since that output is meant for
+// machines, and falls back to parsing the human-readable sentences for an
+// arch-audit without --format. Output is trusted only when every line
+// parses: an unrecognized line means the format changed, and an empty
+// result from output GASP cannot read would be a false all-clear. A failed
+// audit leaves the previous findings in place.
+//
+// arch-audit only reads the local database (installed versions); whether a
+// fix exists comes from the tracker. So it runs with the system's default
+// database path, not checkupdates' private copy.
+func (p *pacmanBackend) audit(ctx context.Context) {
 	if !p.auditInstalled() {
 		return
 	}
-	var attempts [][]string
-	if useDB && p.dbDir != "" {
-		attempts = append(attempts, []string{"--dbpath", p.dbDir})
+	type attempt struct {
+		args  []string
+		parse func([]byte) ([]types.PackageUpdate, []types.PackageUpdate, bool)
 	}
-	attempts = append(attempts, nil)
-	for _, args := range attempts {
-		res, err := p.runner.Run(ctx, nil, "arch-audit", args...)
+	attempts := []attempt{
+		{[]string{"--format", archAuditFormat}, parseArchAuditFormat},
+		{nil, parseArchAuditText},
+	}
+	var problems []string
+	for _, a := range attempts {
+		res, err := p.runner.Run(ctx, nil, "arch-audit", a.args...)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
 			}
+			problems = append(problems, err.Error())
 			continue
 		}
-		fixable, unfixed := parseArchAudit(res.Stdout)
-		// Trust a non-zero exit only if it still printed findings.
-		if res.ExitCode != 0 && len(fixable)+len(unfixed) == 0 {
+		if res.ExitCode != 0 {
+			problems = append(problems, fmt.Sprintf("exited %d: %s", res.ExitCode, firstLine(res.Stderr)))
+			continue
+		}
+		fixable, unfixed, ok := a.parse(res.Stdout)
+		if !ok {
+			problems = append(problems, "unrecognized output: "+firstUnparsed(res.Stdout, a.parse))
 			continue
 		}
 		p.lastSecurity, p.lastUnfixed = fixable, unfixed
 		p.securityKnown = true
 		return
 	}
+	log.Printf("packages: arch-audit failed, keeping previous findings: %s", strings.Join(problems, "; "))
+}
+
+// firstUnparsed returns the first output line the parser rejects, for the
+// log.
+func firstUnparsed(out []byte, parse func([]byte) ([]types.PackageUpdate, []types.PackageUpdate, bool)) string {
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if _, _, ok := parse([]byte(line)); !ok {
+			if len(line) > 120 {
+				line = line[:120]
+			}
+			return line
+		}
+	}
+	return "(none)"
 }
 
 // auditState is arch-audit's last findings, kept in the state file so a
@@ -239,40 +287,104 @@ func (p *pacmanBackend) applySecurity(out *checkResult) {
 	out.Method += " + arch-audit"
 }
 
-// archAuditLine matches arch-audit's default output, for example:
-//
-//	Package openssl is affected by CVE-2026-1234, CVE-2026-1235. High risk!
-//	Package curl is affected by CVE-2026-2222. Medium risk! Update to 8.11.1-1!
-//	Package foo is affected by CVE-2026-3333. Low risk! Update to 1.2-1 from testing repos!
-var archAuditLine = regexp.MustCompile(`^Package (\S+) is affected by (.+?)\. (\w+) risk!(?: Update to (\S+?)( from testing repos)?!)?`)
-
-// parseArchAudit splits arch-audit output into packages a released update
-// fixes and packages with no fix yet. A fix that is only in the testing
-// repos counts as no fix yet: pacman -Syu on a normal system cannot get it.
-func parseArchAudit(out []byte) (fixable, unfixed []types.PackageUpdate) {
+// parseArchAuditFormat reads archAuditFormat output. ok is false if any
+// non-empty line does not have the expected fields.
+func parseArchAuditFormat(out []byte) (fixable, unfixed []types.PackageUpdate, ok bool) {
 	fixable = []types.PackageUpdate{}
 	unfixed = []types.PackageUpdate{}
 	sc := bufio.NewScanner(bytes.NewReader(out))
 	for sc.Scan() {
-		m := archAuditLine.FindStringSubmatch(strings.TrimSpace(sc.Text()))
-		if m == nil {
+		line := strings.TrimRight(sc.Text(), "\r")
+		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		var issues []string
-		for _, issue := range strings.Split(m[2], ",") {
-			if issue = strings.TrimSpace(issue); issue != "" {
-				issues = append(issues, issue)
-			}
+		f := strings.Split(line, "\t")
+		if len(f) != 5 || f[0] == "" || strings.ContainsAny(f[0], " ") {
+			return nil, nil, false
 		}
-		u := types.PackageUpdate{Name: m[1], Severity: strings.ToLower(m[3]), Issues: issues}
-		u.Available = m[4]
-		if m[4] != "" && m[5] == "" {
+		sev, okSev := archAuditSeverity(f[1])
+		if !okSev {
+			return nil, nil, false
+		}
+		u := types.PackageUpdate{Name: f[0], Severity: sev, Available: strings.TrimSpace(f[2])}
+		u.Issues = splitList(f[3])
+		if len(u.Issues) == 0 {
+			u.Issues = splitList(f[4])
+		}
+		if u.Available != "" {
 			fixable = append(fixable, u)
 		} else {
 			unfixed = append(unfixed, u)
 		}
 	}
-	return fixable, unfixed
+	return fixable, unfixed, true
+}
+
+// archAuditText matches arch-audit's human-readable output. Current
+// versions print
+//
+//	openssl is affected by arbitrary code execution. High risk! Update to at least 3.4.1-1!
+//	curl is affected by denial of service. (CVE-2026-2222). Medium risk!
+//
+// (the CVE clause only with -c, "It's required by ..." only with -r, and
+// "Update to at least X from the testing repos!" only with --show-testing).
+// Older versions started with "Package ", listed CVEs as the issues and said
+// "Update to X!". All of these match.
+var archAuditText = regexp.MustCompile(`^(?:Package )?(\S+) is affected by (.+?)\. (?:\(([^)]*)\)\. )?(?:It's required by .+?\. )?(\w+) risk!(?: Update to (?:at least )?(\S+?)( from (?:the )?testing repos)?!)?$`)
+
+// parseArchAuditText reads arch-audit's default output. A fix that is only
+// in the testing repos counts as no fix yet: pacman -Syu on a normal system
+// cannot get it. ok is false if any non-empty line does not match.
+func parseArchAuditText(out []byte) (fixable, unfixed []types.PackageUpdate, ok bool) {
+	fixable = []types.PackageUpdate{}
+	unfixed = []types.PackageUpdate{}
+	sc := bufio.NewScanner(bytes.NewReader(out))
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		m := archAuditText.FindStringSubmatch(line)
+		if m == nil {
+			return nil, nil, false
+		}
+		sev, _ := archAuditSeverity(m[4] + " risk")
+		u := types.PackageUpdate{Name: m[1], Severity: sev}
+		if u.Issues = splitList(m[3]); len(u.Issues) == 0 {
+			u.Issues = splitList(m[2])
+		}
+		if m[5] != "" && m[6] == "" {
+			u.Available = m[5]
+			fixable = append(fixable, u)
+		} else {
+			unfixed = append(unfixed, u)
+		}
+	}
+	return fixable, unfixed, true
+}
+
+// archAuditSeverity turns "High risk" into "high". ok is false for text
+// that is not a severity.
+func archAuditSeverity(s string) (string, bool) {
+	word, found := strings.CutSuffix(strings.TrimSpace(s), " risk")
+	if !found {
+		return "", false
+	}
+	word = strings.ToLower(word)
+	if _, known := severityRank[word]; !known {
+		return "", false
+	}
+	return word, true
+}
+
+func splitList(s string) []string {
+	var out []string
+	for _, item := range strings.Split(s, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 // MetadataTime is the newest sync database on the system. The private

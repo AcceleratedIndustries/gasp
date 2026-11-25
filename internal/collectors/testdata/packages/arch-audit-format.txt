@@ -1,0 +1,4 @@
+glibc	Critical risk	2.40-2	CVE-2026-4444	privilege escalation
+openssl	High risk	3.4.1-1	CVE-2026-1234, CVE-2026-1235	arbitrary code execution, denial of service
+curl	Medium risk		CVE-2026-2222	information disclosure
+libxml2	Low risk		CVE-2026-3333	denial of service

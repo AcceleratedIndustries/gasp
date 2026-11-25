@@ -1,4 +1,4 @@
-Package openssl is affected by CVE-2026-1234, CVE-2026-1235. High risk! Update to 3.4.1-1!
-Package curl is affected by CVE-2026-2222. Medium risk! Update to 8.11.1-1 from testing repos!
-Package libxml2 is affected by CVE-2026-3333. Low risk!
-Package glibc is affected by CVE-2026-4444. Critical risk! Update to 2.40-2!
+glibc is affected by privilege escalation. Critical risk! Update to at least 2.40-2!
+openssl is affected by arbitrary code execution, denial of service. High risk! Update to at least 3.4.1-1!
+curl is affected by information disclosure. Medium risk!
+libxml2 is affected by denial of service. Low risk!
