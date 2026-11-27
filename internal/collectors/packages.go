@@ -299,7 +299,7 @@ func (c *PackageCollector) refresh(ctx context.Context, force bool) {
 		c.lastResult = &r
 		c.lastSuccess = now
 		c.everSucceeded = true
-		c.trackFirstSeen(res.Pending, now)
+		c.trackFirstSeen(res.Pending, res.Ignored, now)
 	}
 	c.saveState()
 	c.publish()
@@ -335,6 +335,7 @@ func (c *PackageCollector) publish() {
 		Reboot:        detectReboot(c.fs, c.backend.KeepsOldKernels()),
 		Duration:      c.lastDuration,
 		InProgress:    c.inProgress,
+		NetworkOff:    !c.networkSupported,
 	}
 	f.MetadataTime, f.HaveMetadata = c.backend.MetadataTime()
 	f.LastUpgrade, f.HaveUpgrade = c.backend.LastUpgrade()
@@ -355,8 +356,10 @@ func (c *PackageCollector) publish() {
 func pendingKey(p pendingPackage) string { return p.Name + "@" + p.Available }
 
 // trackFirstSeen records when each pending package/version was first seen
-// and forgets the ones no longer pending.
-func (c *PackageCollector) trackFirstSeen(pending []pendingPackage, now time.Time) {
+// and forgets the ones no longer pending. A package held back by IgnorePkg
+// keeps a time it already has, so it is not reset when it becomes pending
+// again, but its clock never starts while it is held back.
+func (c *PackageCollector) trackFirstSeen(pending, ignored []pendingPackage, now time.Time) {
 	keep := make(map[string]time.Time, len(pending))
 	for _, p := range pending {
 		k := pendingKey(p)
@@ -364,6 +367,12 @@ func (c *PackageCollector) trackFirstSeen(pending []pendingPackage, now time.Tim
 			keep[k] = t
 		} else {
 			keep[k] = now
+		}
+	}
+	for _, p := range ignored {
+		k := pendingKey(p)
+		if t, ok := c.state.FirstSeen[k]; ok {
+			keep[k] = t
 		}
 	}
 	c.state.FirstSeen = keep
@@ -501,6 +510,9 @@ type pkgFacts struct {
 	LastNetworkCheck time.Time
 	Duration         time.Duration
 	InProgress       bool
+	// NetworkOff is true when the network check will not run (turned off
+	// in the config, or checkupdates missing).
+	NetworkOff bool
 }
 
 var severityRank = map[string]int{"unknown": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
@@ -706,7 +718,7 @@ func interpretPackages(m types.PackageMetrics, f pkgFacts, s config.PackageSetti
 		case pending == 0 && ignoredN > 0:
 			parts = append(parts, "nothing pending outside IgnorePkg")
 		case pending == 0:
-			parts = append(parts, "up to date per local "+f.Manager+" database")
+			parts = append(parts, "up to date "+upToDateSource(f, now))
 		case secPendingN > 0:
 			parts = append(parts, fmt.Sprintf("%s pending, %d of them security", plural(pending, "update"), secPendingN)+nameList(secPending))
 		case m.SecurityUpdatesPending != nil:
@@ -721,8 +733,12 @@ func interpretPackages(m types.PackageMetrics, f pkgFacts, s config.PackageSetti
 			parts = append(parts, plural(secIgnoredN, "security update")+" held back by IgnorePkg"+nameList(secIgnored))
 		}
 		if m.SecurityUpdatesPending == nil {
-			if f.Manager == "pacman" {
-				parts = append(parts, "security status unknown (install arch-audit to check)")
+			why := f.Result.SecurityUnknownWhy
+			if why == whyAuditNotRun && f.NetworkOff {
+				why = whyNetworkOff
+			}
+			if why != "" {
+				parts = append(parts, "security status unknown ("+why+")")
 			} else {
 				parts = append(parts, "security status unknown")
 			}
@@ -756,6 +772,18 @@ func interpretPackages(m types.PackageMetrics, f pkgFacts, s config.PackageSetti
 		parts = append(parts, "a package manager is running")
 	}
 	return strings.Join(parts, "; ")
+}
+
+// upToDateSource says what "up to date" was checked against: the package
+// lists GASP synced with checkupdates, or the system's own databases.
+func upToDateSource(f pkgFacts, now time.Time) string {
+	if strings.HasPrefix(f.Result.Method, "checkupdates") {
+		if f.LastNetworkCheck.IsZero() {
+			return "per GASP's synced package lists"
+		}
+		return "per package lists synced " + ago(now.Sub(f.LastNetworkCheck))
+	}
+	return "per local " + f.Manager + " database"
 }
 
 // countIgnored counts security updates held back by IgnorePkg.

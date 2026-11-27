@@ -28,6 +28,9 @@ type checkResult struct {
 	// SecurityKnown is false when this check cannot tell security updates
 	// from routine ones (for example pacman without arch-audit).
 	SecurityKnown bool
+	// SecurityUnknownWhy says why security status is unknown, for the
+	// interpretation (empty when known, or when there is nothing to say).
+	SecurityUnknownWhy string
 	// Security lists packages with a known security issue that an
 	// available update fixes.
 	Security []types.PackageUpdate

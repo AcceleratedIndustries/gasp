@@ -42,6 +42,9 @@ type pacmanBackend struct {
 	securityKnown  bool
 	hasAudit       bool
 	auditLookedFor bool
+	// auditFailed is true when the last arch-audit run gave no usable
+	// output.
+	auditFailed bool
 }
 
 func (p *pacmanBackend) Name() string { return "pacman" }
@@ -250,8 +253,10 @@ func (p *pacmanBackend) audit(ctx context.Context) {
 		}
 		p.lastSecurity, p.lastUnfixed = fixable, unfixed
 		p.securityKnown = true
+		p.auditFailed = false
 		return
 	}
+	p.auditFailed = true
 	log.Printf("packages: arch-audit failed, keeping previous findings: %s", strings.Join(problems, "; "))
 }
 
@@ -300,6 +305,14 @@ func (p *pacmanBackend) restoreAudit(a *auditState) {
 // finding goes away as soon as the package is upgraded.
 func (p *pacmanBackend) applySecurity(out *checkResult) {
 	if !p.securityKnown {
+		switch {
+		case !p.auditInstalled():
+			out.SecurityUnknownWhy = whyNoAudit
+		case p.auditFailed:
+			out.SecurityUnknownWhy = whyAuditFailed
+		default:
+			out.SecurityUnknownWhy = whyAuditNotRun
+		}
 		return
 	}
 	out.SecurityKnown = true
@@ -328,6 +341,14 @@ func (p *pacmanBackend) applySecurity(out *checkResult) {
 	out.Unfixed = append([]types.PackageUpdate{}, p.lastUnfixed...)
 	out.Method += " + arch-audit"
 }
+
+// Reasons security status is unknown on pacman.
+const (
+	whyNoAudit     = "install arch-audit to check"
+	whyAuditFailed = "arch-audit's output could not be read; see the log"
+	whyAuditNotRun = "arch-audit runs with the daily network check, which has not run yet"
+	whyNetworkOff  = "arch-audit runs only with the network check, which is off"
+)
 
 // parseArchAuditFormat reads archAuditFormat output. ok is false if any
 // non-empty line does not have the expected fields.

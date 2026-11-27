@@ -689,3 +689,92 @@ func TestPacmanArchAudit020Replay(t *testing.T) {
 		t.Errorf("interpretation = %q", m.Interpretation)
 	}
 }
+
+// With arch-audit installed, an unknown security status names its real
+// cause instead of asking to install arch-audit.
+func TestPacmanSecurityUnknownReasons(t *testing.T) {
+	// Network check unavailable (no checkupdates), so arch-audit never runs.
+	r := newFakeRunner("pacman", "arch-audit")
+	r.set("pacman -Qu", cmdResult{ExitCode: 1}, nil)
+	clock := &fakeClock{t: rollupNow}
+	c := newTestCollector(t, archRoot(t), r, clock, "")
+	c.refresh(context.Background(), true)
+	m := collectPkgs(t, c)
+	if m.SecurityUpdatesPending != nil || !strings.Contains(m.Interpretation, whyNetworkOff) || strings.Contains(m.Interpretation, "install arch-audit") {
+		t.Errorf("network off: %q", m.Interpretation)
+	}
+
+	// Network check not run yet.
+	p := &pacmanBackend{runner: r}
+	if out, _ := p.LocalCheck(context.Background()); out.SecurityKnown || out.SecurityUnknownWhy != whyAuditNotRun {
+		t.Errorf("not run yet: known=%v why=%q", out.SecurityKnown, out.SecurityUnknownWhy)
+	}
+
+	// arch-audit ran and its output could not be read, with nothing earlier
+	// to fall back on.
+	r = newFakeRunner("pacman", "checkupdates", "arch-audit")
+	setupPacman(r)
+	garbled := cmdResult{Stdout: []byte("Some new format nobody told GASP about\n")}
+	r.set("arch-audit --format "+archAuditFormat, garbled, nil)
+	r.set("arch-audit", garbled, nil)
+	p = &pacmanBackend{runner: r}
+	if out, _ := p.NetworkCheck(context.Background()); out.SecurityKnown || out.SecurityUnknownWhy != whyAuditFailed {
+		t.Errorf("unreadable: known=%v why=%q", out.SecurityKnown, out.SecurityUnknownWhy)
+	}
+
+	// Not installed: the hint stays.
+	r = newFakeRunner("pacman")
+	r.set("pacman -Qu", cmdResult{ExitCode: 1}, nil)
+	p = &pacmanBackend{runner: r}
+	if out, _ := p.LocalCheck(context.Background()); out.SecurityUnknownWhy != whyNoAudit {
+		t.Errorf("not installed: why=%q", out.SecurityUnknownWhy)
+	}
+}
+
+// A package held back by IgnorePkg keeps its first-seen time, so releasing
+// it does not restart the clock, but a package first seen while held back
+// gets no time until it is pending.
+func TestPacmanFirstSeenKeptWhileIgnored(t *testing.T) {
+	r := newFakeRunner("pacman")
+	clock := &fakeClock{t: rollupNow}
+	c := newTestCollector(t, archRoot(t), r, clock, "")
+	check := func(out string) {
+		t.Helper()
+		r.set("pacman -Qu", cmdResult{Stdout: []byte(out)}, nil)
+		c.refresh(context.Background(), true)
+	}
+	const nanoKey, lessKey = "nano@9.3-1", "less@700-1"
+
+	check("nano 8.6-1 -> 9.3-1\n")
+	first := c.state.FirstSeen[nanoKey]
+	if first.IsZero() {
+		t.Fatalf("nano not tracked: %v", c.state.FirstSeen)
+	}
+
+	clock.add(10 * time.Minute)
+	check("nano 8.6-1 -> 9.3-1 [ignored]\nless 692-1 -> 700-1 [ignored]\n")
+	if got := c.state.FirstSeen[nanoKey]; !got.Equal(first) {
+		t.Fatalf("nano's first-seen changed while ignored: %v, want %v", got, first)
+	}
+	if _, ok := c.state.FirstSeen[lessKey]; ok {
+		t.Errorf("less got a first-seen time while held back: %v", c.state.FirstSeen)
+	}
+	if m := collectPkgs(t, c); m.OldestPendingDays != nil {
+		t.Errorf("ignored packages counted toward age: %v", *m.OldestPendingDays)
+	}
+
+	clock.add(10 * time.Minute)
+	check("nano 8.6-1 -> 9.3-1\nless 692-1 -> 700-1\n")
+	if got := c.state.FirstSeen[nanoKey]; !got.Equal(first) {
+		t.Errorf("nano's first-seen reset on release: %v, want %v", got, first)
+	}
+	if got := c.state.FirstSeen[lessKey]; !got.Equal(clock.t) {
+		t.Errorf("less first-seen = %v, want %v", got, clock.t)
+	}
+
+	// Upgraded: forgotten.
+	check("")
+	if len(c.state.FirstSeen) != 0 {
+		t.Errorf("first seen after upgrade = %v", c.state.FirstSeen)
+	}
+}

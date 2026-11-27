@@ -256,13 +256,31 @@ func TestEvaluatePackagesNullsAndListing(t *testing.T) {
 		t.Errorf("never succeeded: status=%s pending=%v", m.Status, m.UpdatesPending)
 	}
 
-	// pacman without arch-audit: security null and the interpretation says why.
-	f := baseFacts("pacman", 3)
-	f.Result.SecurityKnown = false
-	m = evaluatePackages(f, def, rollupNow)
-	if m.SecurityUpdatesPending != nil || !strings.Contains(m.Interpretation, "install arch-audit") {
-		t.Errorf("pacman without arch-audit: sec=%v %q", m.SecurityUpdatesPending, m.Interpretation)
+	// Security unknown: null, and the interpretation gives the real cause.
+	for _, tc := range []struct {
+		why        string
+		networkOff bool
+		want       string
+	}{
+		{whyNoAudit, false, "security status unknown (install arch-audit to check)"},
+		{whyAuditFailed, false, "security status unknown (arch-audit's output could not be read; see the log)"},
+		{whyAuditNotRun, false, "security status unknown (arch-audit runs with the daily network check, which has not run yet)"},
+		{whyAuditNotRun, true, "security status unknown (arch-audit runs only with the network check, which is off)"},
+		{"", false, "security status unknown;"},
+	} {
+		f := baseFacts("pacman", 3)
+		f.Result.SecurityKnown = false
+		f.Result.SecurityUnknownWhy = tc.why
+		f.NetworkOff = tc.networkOff
+		m = evaluatePackages(f, def, rollupNow)
+		if m.SecurityUpdatesPending != nil || !strings.Contains(m.Interpretation, tc.want) {
+			t.Errorf("why=%q off=%v: sec=%v %q", tc.why, tc.networkOff, m.SecurityUpdatesPending, m.Interpretation)
+		}
+		if tc.why != whyNoAudit && strings.Contains(m.Interpretation, "install arch-audit") {
+			t.Errorf("why=%q: suggests installing arch-audit: %q", tc.why, m.Interpretation)
+		}
 	}
+	f := baseFacts("pacman", 3)
 
 	// Only security updates are named, sorted by severity, capped.
 	f = baseFacts("pacman", 4)
@@ -325,6 +343,31 @@ func TestNextDailySlot(t *testing.T) {
 	for _, c := range cases {
 		if got := nextDailySlot(c.now, 3, 30, c.jitter); !got.Equal(c.want) {
 			t.Errorf("now %v jitter %v: got %v, want %v", c.now, c.jitter, got, c.want)
+		}
+	}
+}
+
+// "Up to date" names what it was checked against.
+func TestUpToDateSource(t *testing.T) {
+	def := config.PackagesConfig{}.Resolve()
+	for _, tc := range []struct {
+		method string
+		synced time.Duration // 0: no network check recorded
+		want   string
+	}{
+		{"checkupdates + arch-audit", 5 * time.Minute, "up to date per package lists synced 5m ago;"},
+		{"checkupdates --nosync + arch-audit", 3 * time.Hour, "up to date per package lists synced 3h ago;"},
+		{"checkupdates --nosync", 0, "up to date per GASP's synced package lists;"},
+		{"pacman -Qu", 0, "up to date per local pacman database;"},
+	} {
+		f := baseFacts("pacman", 0)
+		f.Result.Method = tc.method
+		if tc.synced > 0 {
+			f.LastNetworkCheck = rollupNow.Add(-tc.synced)
+		}
+		m := evaluatePackages(f, def, rollupNow)
+		if !strings.HasPrefix(m.Interpretation, tc.want) {
+			t.Errorf("%s: %q", tc.method, m.Interpretation)
 		}
 	}
 }
