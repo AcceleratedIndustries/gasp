@@ -1,0 +1,2 @@
+nano	High risk	9.3-1	CVE-2099-0001	arbitrary code execution
+less	Medium risk		CVE-2099-0002	denial of service

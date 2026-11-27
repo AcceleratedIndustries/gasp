@@ -257,3 +257,28 @@ func TestSplitKernelRelease(t *testing.T) {
 		t.Error("6.8.0-51 should be newer than 6.8.0-49")
 	}
 }
+
+// arch-audit 0.2.0's own output, run against the fake tracker in
+// arch-audit-fake-avgs.json on a real Arch box (the Arch test run,
+// Nov 2026). Both parsers must read it the same way.
+func TestParseArchAudit020Output(t *testing.T) {
+	for _, tc := range []struct {
+		file  string
+		parse func([]byte) ([]types.PackageUpdate, []types.PackageUpdate, bool)
+		issue string
+	}{
+		{"arch-audit-0.2.0-fake-format.txt", parseArchAuditFormat, "CVE-2099-0001"},
+		{"arch-audit-0.2.0-fake.txt", parseArchAuditText, "arbitrary code execution"},
+	} {
+		fixable, unfixed, ok := tc.parse(readFixture(t, tc.file))
+		if !ok || len(fixable) != 1 || len(unfixed) != 1 {
+			t.Fatalf("%s: ok=%v fixable=%+v unfixed=%+v", tc.file, ok, fixable, unfixed)
+		}
+		if f := fixable[0]; f.Name != "nano" || f.Severity != "high" || f.Available != "9.3-1" || len(f.Issues) != 1 || f.Issues[0] != tc.issue {
+			t.Errorf("%s: nano = %+v", tc.file, f)
+		}
+		if u := unfixed[0]; u.Name != "less" || u.Severity != "medium" || u.Available != "" {
+			t.Errorf("%s: less = %+v", tc.file, u)
+		}
+	}
+}

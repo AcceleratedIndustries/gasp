@@ -1,0 +1,4 @@
+[
+ {"name":"AVG-9001","packages":["nano"],"status":"Fixed","type":"arbitrary code execution","severity":"High","fixed":"9.3-1","issues":["CVE-2099-0001"]},
+ {"name":"AVG-9002","packages":["less"],"status":"Vulnerable","type":"denial of service","severity":"Medium","fixed":null,"issues":["CVE-2099-0002"]}
+]

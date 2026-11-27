@@ -1,0 +1,2 @@
+nano is affected by arbitrary code execution. High risk! Update to at least 9.3-1!
+less is affected by denial of service. Medium risk!

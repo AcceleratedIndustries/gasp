@@ -1,8 +1,8 @@
 # GASP package reporting: Arch test checklist
 
-For the Arch mini PC coming back online. Run it against branch `fix/arch-audit-parser` (3 commits on main f015398), which fixes the arch-audit mismatches below and adds live tests (step 4). Not merged; no PR yet. Run GASP as your normal user, not root. Everything goes in `~/gasp-test/`; save each command's output under `~/gasp-test/out/` so the results can be read back afterwards.
+For the Arch mini PC coming back online. Run it against branch `fix/arch-audit-parser` (on top of main f015398), which fixes the arch-audit mismatches below and adds live tests (step 4). Not merged; no PR yet. Run GASP as your normal user, not root. Everything goes in `~/gasp-test/`; save each command's output under `~/gasp-test/out/` so the results can be read back afterwards.
 
-**On phunklab:** the repo is already checked out at `~/dev/gasp`. In step 4, use it in place of the clone:
+**On the Arch test box:** if the repo is already checked out (for example at `~/dev/gasp`), use it in step 4 in place of the clone:
 
 ```
 cd ~/dev/gasp && git fetch origin && git checkout fix/arch-audit-parser && git pull
@@ -120,7 +120,7 @@ make test-arch 2>&1 | tee ~/gasp-test/out/test-arch.txt
   - `TestLiveArchAuditReal`: the real tracker; every package arch-audit prints must be parsed by both parsers.
   - `TestLiveCheckupdates`: real network and `--nosync` checks; counts must match `checkupdates --nosync` and `pacman -Qu` (minus ignored), and GASP's ignored list must match pacman's `[ignored]` lines. If anything is pending, it also checks that a pending package with a released fix is marked as a security update. It skips that part when nothing is pending (see the nano downgrade in step 6).
   - `TestLiveReboot`, `TestLiveLogAndMetadata`, `TestLiveCollector`: reboot detection, pacman.log and sync DB times, and one full collector run (logs the whole packages block).
-- [ ] The raw output in `test-arch.txt` replaces the hand-written fixtures in `internal/collectors/testdata/packages/` (`arch-audit.txt`, `arch-audit-format.txt`).
+- [ ] Done after the first run (Nov 2026): arch-audit 0.2.0's output against the fake tracker is in `internal/collectors/testdata/packages/arch-audit-0.2.0-fake*.txt`, replayed by `TestParseArchAudit020Output` and `TestPacmanArchAudit020Replay`. Only ever commit fake-tracker output: the real tracker's output lists the box's own vulnerable packages, and the repo is public.
 
 ## 5. Run GASP and force the daily network check
 

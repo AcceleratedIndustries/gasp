@@ -636,3 +636,56 @@ func TestManagerPackageSummary(t *testing.T) {
 		t.Errorf("recent changes = %v", snap.Summary.RecentChanges)
 	}
 }
+
+// Replays the Arch test run (Nov 2026): nano downgraded to 8.6-1, arch-audit
+// 0.2.0 reading the fake tracker. GASP must flag nano, then keep flagging it
+// once IgnorePkg holds it back.
+func TestPacmanArchAudit020Replay(t *testing.T) {
+	root := archRoot(t)
+	stateDir := t.TempDir()
+	dbDir := filepath.Join(stateDir, "checkup-db")
+	r := newFakeRunner("pacman", "checkupdates", "arch-audit")
+	r.set("checkupdates", cmdResult{Stdout: []byte("nano 8.6-1 -> 9.3-1\n")}, nil)
+	r.set("pacman -Qu --dbpath "+dbDir, cmdResult{Stdout: []byte("nano 8.6-1 -> 9.3-1\n")}, nil)
+	r.set("arch-audit --format "+archAuditFormat, cmdResult{Stdout: readFixture(t, "arch-audit-0.2.0-fake-format.txt")}, nil)
+	clock := &fakeClock{t: time.Date(2026, 11, 27, 16, 15, 0, 0, time.Local)}
+
+	c := newTestCollector(t, root, r, clock, stateDir)
+	c.refresh(context.Background(), true)
+	m := collectPkgs(t, c)
+	if *m.UpdatesPending != 1 || *m.UpdatesIgnored != 0 || *m.SecurityUpdatesPending != 1 || *m.VulnerableUnfixed != 1 {
+		t.Fatalf("pending=%d ignored=%d security=%d unfixed=%d", *m.UpdatesPending, *m.UpdatesIgnored, *m.SecurityUpdatesPending, *m.VulnerableUnfixed)
+	}
+	if m.State != "security_updates_pending" || m.SecurityMaxSeverity != "high" || !m.NeedsUpdate {
+		t.Errorf("state=%s severity=%s needs_update=%v", m.State, m.SecurityMaxSeverity, m.NeedsUpdate)
+	}
+	if len(m.SecurityUpdates) != 1 || m.SecurityUpdates[0].Name != "nano" || m.SecurityUpdates[0].Installed != "8.6-1" || m.SecurityUpdates[0].Ignored {
+		t.Errorf("security updates = %+v", m.SecurityUpdates)
+	}
+	if len(m.NeedsUpdateReasons) != 1 || m.NeedsUpdateReasons[0] != "1 security update pending (max severity: high)" {
+		t.Errorf("reasons = %v", m.NeedsUpdateReasons)
+	}
+	if !strings.HasPrefix(m.Interpretation, "1 update pending, 1 of them security (nano); 1 vulnerable package with no fix yet") {
+		t.Errorf("interpretation = %q", m.Interpretation)
+	}
+
+	// IgnorePkg = nano: checkupdates hides it, pacman -Qu marks it.
+	r.set("checkupdates", cmdResult{ExitCode: 2}, nil)
+	stateDir = t.TempDir() // fresh state, so the network check runs again
+	r.set("pacman -Qu --dbpath "+filepath.Join(stateDir, "checkup-db"), cmdResult{Stdout: []byte("nano 8.6-1 -> 9.3-1 [ignored]\n")}, nil)
+	c = newTestCollector(t, root, r, clock, stateDir)
+	c.refresh(context.Background(), true)
+	m = collectPkgs(t, c)
+	if *m.UpdatesPending != 0 || *m.UpdatesIgnored != 1 || *m.SecurityUpdatesPending != 1 || !m.NeedsUpdate {
+		t.Fatalf("ignored: pending=%d ignored=%d security=%d needs=%v", *m.UpdatesPending, *m.UpdatesIgnored, *m.SecurityUpdatesPending, m.NeedsUpdate)
+	}
+	if len(m.SecurityUpdates) != 1 || !m.SecurityUpdates[0].Ignored {
+		t.Errorf("security updates = %+v", m.SecurityUpdates)
+	}
+	if len(m.NeedsUpdateReasons) != 1 || m.NeedsUpdateReasons[0] != "1 security update pending (max severity: high, 1 held back by IgnorePkg)" {
+		t.Errorf("reasons = %v", m.NeedsUpdateReasons)
+	}
+	if !strings.HasPrefix(m.Interpretation, "nothing pending outside IgnorePkg; 1 update held back by IgnorePkg, not counted as pending; 1 security update held back by IgnorePkg (nano)") {
+		t.Errorf("interpretation = %q", m.Interpretation)
+	}
+}
