@@ -139,9 +139,7 @@ func newTestCollector(t *testing.T, root string, r *fakeRunner, clock *fakeClock
 	c := newPackageCollector(testSettings(), stateDir, pkgFS{root: root}, r, clock.now)
 	c.startOnce.Do(func() {}) // keep Collect from starting the goroutine
 	if c.backend != nil {
-		c.loadState()
-		c.networkSupported = c.settings.AllowNetwork && c.backend.Name() == "pacman"
-		c.scheduleFirstNetwork()
+		c.prepare()
 	}
 	return c
 }

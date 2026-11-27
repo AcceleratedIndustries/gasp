@@ -370,7 +370,9 @@ func TestLiveCollector(t *testing.T) {
 	c := newPackageCollector(settings, t.TempDir(), pkgFS{root: "/"}, execRunner{}, time.Now)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	c.refresh(ctx, true) // what the background goroutine does first; not started here
+	// What the background goroutine does first, without starting it.
+	c.prepare()
+	c.refresh(ctx, true)
 	c.mu.RLock()
 	m := copyPackageMetrics(c.cached)
 	c.mu.RUnlock()

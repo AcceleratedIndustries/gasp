@@ -199,9 +199,7 @@ func (c *PackageCollector) Stop() {
 
 func (c *PackageCollector) run(ctx context.Context) {
 	defer close(c.done)
-	c.loadState()
-	c.networkSupported = c.settings.AllowNetwork && c.backend.Name() == "pacman"
-	c.scheduleFirstNetwork()
+	c.prepare()
 	c.safeRefresh(ctx, true)
 
 	ticker := time.NewTicker(c.tick)
@@ -214,6 +212,14 @@ func (c *PackageCollector) run(ctx context.Context) {
 			c.safeRefresh(ctx, false)
 		}
 	}
+}
+
+// prepare loads the saved state and decides whether and when the network
+// check runs. run calls it once before the first refresh.
+func (c *PackageCollector) prepare() {
+	c.loadState()
+	c.networkSupported = c.settings.AllowNetwork && c.backend.Name() == "pacman"
+	c.scheduleFirstNetwork()
 }
 
 // safeRefresh keeps one bad check from killing the goroutine.
